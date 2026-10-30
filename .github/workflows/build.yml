@@ -1,0 +1,141 @@
+# OptiScaler custom build = dashdogy's mod + the latest upstream OptiScaler changes.
+#
+# Start it by hand:  Actions tab > "Build OptiScaler" > Run workflow
+# It also runs by itself once a day (see "schedule" below).
+# The finished build appears at the bottom of the run page, under "Artifacts".
+
+name: Build OptiScaler
+
+on:
+  workflow_dispatch:
+    inputs:
+      mod_repo:
+        description: "Repo that has the mod (owner/name)"
+        default: "dashdogy/OptiScaler"
+      mod_branch:
+        description: "Branch of that repo to build"
+        default: "master"
+  schedule:
+    # Daily at 19:17 UTC. Format: minute hour day month weekday (always UTC by default).
+    - cron: "17 19 * * *"
+      # To think in your own timezone instead: remove the "# " in front of the next line,
+      # put your timezone name in it, and set the hour/minute above in that timezone.
+      # timezone: "Your/Timezone"
+
+permissions:
+  contents: read
+  actions: write # only used to stop GitHub from pausing the daily schedule
+
+env:
+  MOD_REPO: ${{ inputs.mod_repo || 'dashdogy/OptiScaler' }}
+  MOD_BRANCH: ${{ inputs.mod_branch || 'master' }}
+  UPSTREAM_REPO: optiscaler/OptiScaler
+  UPSTREAM_BRANCH: master
+
+jobs:
+  build:
+    # windows-2022 = Visual Studio 2022, which is what OptiScaler asks for.
+    # (windows-latest moved to Visual Studio 2026 in June 2026.)
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Get the mod and merge the latest upstream into it
+        id: prep
+        shell: bash
+        run: |
+          set -u
+          git config --global user.name  "build-bot"
+          git config --global user.email "build-bot@users.noreply.github.com"
+          git config --global core.longpaths true
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+          git clone --branch "$MOD_BRANCH" "https://github.com/$MOD_REPO.git" src
+          cd src
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch upstream "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/upstream/$UPSTREAM_BRANCH"
+
+          UP_REF="upstream/$UPSTREAM_BRANCH"
+          MOD_SHA=$(git rev-parse --short HEAD)
+          UP_SHA=$(git rev-parse --short "$UP_REF")
+          NEW=$(git rev-list --count "HEAD..$UP_REF")
+
+          RESULT="already up to date"
+          CONFLICTS=""
+          if [ "$NEW" != "0" ]; then
+            if git merge --no-edit "$UP_REF"; then
+              RESULT="merged cleanly"
+            else
+              # Both sides edited the same lines. Retry, keeping the mod's version of those lines.
+              CONFLICTS=$(git diff --name-only --diff-filter=U || true)
+              git merge --abort || true
+              echo "::warning::Upstream and the mod changed the same lines. Retrying and keeping the mod's version of those lines."
+              if git merge --no-edit -X ours "$UP_REF"; then
+                RESULT="merged, mod's version kept where both changed the same lines"
+              else
+                git merge --abort || true
+                RESULT="MERGE FAILED - built the mod WITHOUT the latest upstream changes"
+                echo "::warning::Could not merge upstream. Built the mod on its own."
+              fi
+            fi
+          fi
+
+          git submodule sync --recursive
+          git submodule update --init --recursive --jobs 4
+
+          {
+            echo "Built (UTC): $(date -u '+%Y-%m-%d %H:%M')"
+            echo "Mod:         $MOD_REPO @ $MOD_BRANCH ($MOD_SHA)"
+            echo "Upstream:    $UPSTREAM_REPO @ $UPSTREAM_BRANCH ($UP_SHA), $NEW commit(s) the mod didn't have yet"
+            echo "Merge:       $RESULT"
+            if [ -n "$CONFLICTS" ]; then
+              echo "Files where the mod and upstream clashed:"
+              echo "$CONFLICTS" | sed 's/^/  /'
+            fi
+          } > "$GITHUB_WORKSPACE/build-info.txt"
+
+          { echo '```'; cat "$GITHUB_WORKSPACE/build-info.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "label=$(date -u +%Y%m%d-%H%M)-mod-$MOD_SHA-up-$UP_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build (Release, x64)
+        shell: pwsh
+        working-directory: src
+        run: |
+          nuget restore OptiScaler.sln
+          msbuild OptiScaler.sln /m /restore /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Gather the files
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path src -Recurse -Filter OptiScaler.dll -File |
+                 Where-Object { $_.FullName -notmatch '[\\/]external[\\/]' } |
+                 Sort-Object LastWriteTime -Descending |
+                 Select-Object -First 1
+          if (-not $dll) { throw "The build finished but OptiScaler.dll was not found." }
+          Write-Host "Using $($dll.FullName)"
+
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item $dll.FullName package/
+          Copy-Item src/OptiScaler.ini package/ -ErrorAction SilentlyContinue
+          Copy-Item build-info.txt package/
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v7
+        with:
+          name: OptiScaler-${{ steps.prep.outputs.label }}
+          path: package/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Stop GitHub from pausing the daily schedule
+        if: ${{ always() && github.event_name == 'schedule' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          workflow_file="$(basename "${GITHUB_WORKFLOW_REF%%@*}")"
+          gh workflow enable "$workflow_file" --repo "$GITHUB_REPOSITORY" || true
