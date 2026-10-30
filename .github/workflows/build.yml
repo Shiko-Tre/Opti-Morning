@@ -1,308 +1,313 @@
-# =====================================================================
-#  OptiScaler: newest official build + dashdogy's extra features
-#
-#  What this does, every time it runs:
-#    1. Downloads the NEWEST official OptiScaler (optiscaler/OptiScaler, master)
-#    2. Adds dashdogy's work that official doesn't have yet (the "recipe" below)
-#    3. Builds it on a free Windows machine that GitHub lends you
-#    4. Hands you the result as a download (a Release, plus a run Artifact)
-#
-#  When it runs:
-#    - when you press "Run workflow" on the Actions tab (always builds)
-#    - automatically every day (only builds if something actually changed)
-# =====================================================================
+name: Build OptiScaler (upstream master + dashdogy)
 
-name: Build OptiScaler (official + dash)
+# What this does, every time it runs:
+#   1. Downloads the LATEST optiscaler/OptiScaler master
+#   2. Merges dashdogy's branch on top (first branch in the list that merges cleanly)
+#   3. Builds OptiScaler.dll with Visual Studio
+#   4. Drops the new DLL into the latest official nightly package
+#   5. Publishes the result as a Release in YOUR repo (see the "Releases" box on the repo's front page)
 
 on:
+  # The "Run workflow" button in the Actions tab
   workflow_dispatch:
     inputs:
       dash_branches:
-        description: "Optional. dash branches to merge, space-separated. Empty = the default recipe. Type none = plain official build."
-        required: false
+        description: "dashdogy branches to merge, comma separated. The first one that merges cleanly is used. Type none for plain upstream."
         type: string
-      extra_fixes:
-        description: "Optional. Single fixes as branch:first-word-of-commit-title, space-separated. Empty = default. Type none = no extras."
-        required: false
-        type: string
-  schedule:
-    # Every day at 21:17 UTC (= 04:17 in Bangkok). GitHub cron is always in UTC.
-    - cron: "17 21 * * *"
+        default: "mfgunlocker,xefg-vk-interop-inputs"
+      force:
+        description: "Build even if nothing changed since the last build"
+        type: boolean
+        default: true
 
-# ---------------------------------------------------------------------
-#  THE RECIPE: the only part you may ever want to edit.
-#  The text after the || is the default used by the daily run and by
-#  "Run workflow" when you leave the boxes empty.
-# ---------------------------------------------------------------------
-env:
-  UPSTREAM_REPO: optiscaler/OptiScaler
-  UPSTREAM_BRANCH: master
-  DASH_REPO: dashdogy/optiscaler
-  # Branches of dash's fork that get merged on top of official master.
-  DASH_BRANCHES: ${{ inputs.dash_branches || 'xefg-vk-interop-inputs' }}
-  # One-off commits copied from another dash branch (branch:first-word-of-the-commit-title).
-  EXTRA_FIXES: ${{ inputs.extra_fixes || 'mfgunlocker:pairfix.1' }}
+  # Automatic daily build. Cron times are UTC: 11:30 UTC = 19:30 Singapore.
+  # (Upstream's own nightly finishes around 10:50 UTC, so we run after it.)
+  # To turn the daily build off, delete these two lines (schedule + cron).
+  schedule:
+    - cron: "30 11 * * *"
 
 permissions:
-  contents: write # lets this workflow publish Releases in YOUR repository
+  contents: write   # needed to create Releases
 
 concurrency:
-  group: build-optiscaler-dash
+  group: opti-build
   cancel-in-progress: false
 
 jobs:
   build:
-    runs-on: windows-latest
-    timeout-minutes: 120
+    runs-on: windows-2022   # Visual Studio 2022, which is what OptiScaler documents. If GitHub ever retires it, try windows-latest.
+    timeout-minutes: 60
     env:
       GH_TOKEN: ${{ github.token }}
-      # Makes every `gh` command talk to YOUR repo, never to the OptiScaler repos.
-      GH_REPO: ${{ github.repository }}
+      DASH_URL: https://github.com/dashdogy/OptiScaler.git
+      DASH_BRANCHES: ${{ inputs.dash_branches || 'mfgunlocker,xefg-vk-interop-inputs' }}
+      FORCE: ${{ inputs.force }}
+      KEEP_RELEASES: "14"   # how many old builds to keep; older ones are deleted automatically
 
     steps:
-      - name: 1. Download newest official OptiScaler
-        uses: actions/checkout@v6
+      - name: Git settings
+        shell: bash
+        run: |
+          git config --global core.longpaths true
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: Get latest OptiScaler master (with submodules)
+        uses: actions/checkout@v4
         with:
-          repository: ${{ env.UPSTREAM_REPO }}
-          ref: ${{ env.UPSTREAM_BRANCH }}
+          repository: optiscaler/OptiScaler
+          ref: master
           path: src
           fetch-depth: 0
-          submodules: true
+          submodules: recursive
           persist-credentials: false
 
-      - name: 2. Add dash's work on top
+      - name: Merge dashdogy's branch
         id: merge
         shell: bash
+        working-directory: src
         run: |
           set -uo pipefail
-          cd src
+          git config user.name  "optiscaler-custom-build"
+          git config user.email "optiscaler-custom-build@users.noreply.github.com"
 
-          git config user.name  "optiscaler-dash-build"
-          git config user.email "build@users.noreply.github.com"
+          mkdir -p "$GITHUB_WORKSPACE/meta"
+          NOTES="$GITHUB_WORKSPACE/meta/merge-notes.md"
+          : > "$NOTES"
 
-          UP_SHA=$(git rev-parse HEAD)
-          UP7=${UP_SHA:0:7}
-          UP_DATE=$(git log -1 --format=%cs)
-          UP_TITLE=$(git log -1 --format=%s)
-          echo "Official $UPSTREAM_REPO ($UPSTREAM_BRANCH) is at $UP7 from $UP_DATE: $UP_TITLE"
-          echo "Recipe: branches=[$DASH_BRANCHES] extra fixes=[$EXTRA_FIXES]"
+          UP_FULL=$(git rev-parse HEAD)
+          UP_SHORT=$(git rev-parse --short=7 HEAD)
+          MERGED="none"
+          DASH_FULL="none"
+          DASH_SHORT="none"
 
-          git remote add dash "https://github.com/${DASH_REPO}.git"
-          git fetch --no-tags --quiet dash "+refs/heads/*:refs/remotes/dash/*"
-
-          git checkout -q -B combined "$UP_SHA"
-
-          NOTES=()
-          CONFLICT_BRANCHES=()
-          MERGED_ANY=0
-          FIRST_BRANCH=""
-          DASH7=""
-          MODE="combined"
-
-          # ---- A. merge dash's branches -------------------------------------
-          merge_branches() {
-            [ "${DASH_BRANCHES,,}" = "none" ] && return 0
-            local b ref tip cherry_out todo
-            for b in $DASH_BRANCHES; do
-              ref="refs/remotes/dash/$b"
-              if ! git rev-parse --verify -q "$ref" >/dev/null; then
-                echo "::warning::Branch '$b' not found in $DASH_REPO (renamed or deleted?). Skipped."
-                NOTES+=("- **Warning:** branch \`$b\` not found in $DASH_REPO, skipped")
+          WANT_LOWER=$(echo "$DASH_BRANCHES" | tr '[:upper:]' '[:lower:]' | xargs)
+          if [ "$WANT_LOWER" != "none" ] && [ -n "$WANT_LOWER" ]; then
+            git remote add dash "$DASH_URL"
+            IFS=',' read -ra WANT <<< "$DASH_BRANCHES"
+            for raw in "${WANT[@]}"; do
+              b=$(echo "$raw" | xargs)
+              [ -z "$b" ] && continue
+              echo "::group::Trying dashdogy branch: $b"
+              if ! git fetch --no-tags dash "refs/heads/$b"; then
+                echo "::warning::dashdogy branch '$b' could not be fetched (renamed or deleted?)"
+                echo "- \`$b\`: skipped (branch not found)" >> "$NOTES"
+                echo "::endgroup::"
                 continue
               fi
-              [ -z "$FIRST_BRANCH" ] && FIRST_BRANCH=$b
-              tip=$(git rev-parse --short=7 "$ref")
-
-              if git merge-base --is-ancestor "$ref" HEAD; then
-                NOTES+=("- \`$b\` ($tip): already part of official master, nothing to add")
-                continue
-              fi
-              todo=unknown
-              if cherry_out=$(git cherry HEAD "$ref" 2>/dev/null); then
-                todo=$(printf '%s\n' "$cherry_out" | grep -c '^+' || true)
-              fi
-              if [ "$todo" = "0" ]; then
-                NOTES+=("- \`$b\` ($tip): official already has all of its changes, nothing to add")
-                continue
-              fi
-
-              if git merge --no-ff --no-edit -m "Merge dash/$b" "$ref" >/dev/null 2>&1; then
-                NOTES+=("- \`$b\` ($tip): merged, $todo commit(s) that official does not have yet")
-                MERGED_ANY=1
-                DASH7=$tip
+              TIP=$(git rev-parse FETCH_HEAD)
+              BEFORE=$(git rev-parse HEAD)
+              if git merge --no-edit --no-ff -m "Merge dashdogy/$b into upstream master" "$TIP"; then
+                # same file contents as before the merge = his changes are already in upstream
+                if [ "$(git rev-parse "$BEFORE^{tree}")" = "$(git rev-parse 'HEAD^{tree}')" ]; then
+                  MERGED="$b (already in upstream)"
+                  echo "- \`$b\`: everything in it is already in upstream master, nothing extra to merge" >> "$NOTES"
+                else
+                  MERGED="$b"
+                  echo "- \`$b\`: merged cleanly" >> "$NOTES"
+                fi
+                DASH_FULL="$TIP"
+                DASH_SHORT=$(git rev-parse --short=7 "$TIP")
+                echo "::endgroup::"
+                break
               else
-                git merge --abort 2>/dev/null || git reset -q --hard
-                echo "::warning::Branch '$b' conflicts with the newest official master. Skipped."
-                NOTES+=("- **Warning:** \`$b\` ($tip) CONFLICTS with the newest official master, skipped")
-                CONFLICT_BRANCHES+=("$b")
+                echo "::warning::dashdogy branch '$b' conflicts with the current upstream master, skipping it"
+                git merge --abort 2>/dev/null || git reset --hard "$BEFORE"
+                echo "- \`$b\`: skipped (merge conflict with current upstream master)" >> "$NOTES"
+                echo "::endgroup::"
               fi
             done
-          }
-
-          # ---- B. copy single commits from other branches --------------------
-          apply_extra_fixes() {
-            [ "${EXTRA_FIXES,,}" = "none" ] && return 0
-            local spec br title ref sha s7
-            for spec in $EXTRA_FIXES; do
-              br=${spec%%:*}
-              title=${spec#*:}
-              if [ "$br" = "$spec" ] || [ -z "$title" ]; then
-                echo "::warning::Extra fix '$spec' is not in branch:title form. Skipped."
-                NOTES+=("- **Warning:** extra fix \`$spec\` is not in branch:title form, skipped")
-                continue
-              fi
-              ref="refs/remotes/dash/$br"
-              sha=""
-              if git rev-parse --verify -q "$ref" >/dev/null; then
-                sha=$(git log "$ref" --format='%H%x09%s' | awk -F'\t' -v t="$title" 'index($2,t)==1 {print $1; exit}')
-              fi
-              if [ -z "$sha" ]; then
-                echo "::warning::Extra fix '$title' not found on branch '$br'. Skipped."
-                NOTES+=("- **Warning:** extra fix \`$title\` not found on branch \`$br\`, skipped")
-                continue
-              fi
-              s7=${sha:0:7}
-              if git cherry HEAD "$sha" "${sha}^" 2>/dev/null | grep -q '^-'; then
-                NOTES+=("- extra fix \`$title\` ($s7 from \`$br\`): already in the build, nothing to add")
-                continue
-              fi
-              if git cherry-pick -x "$sha" >/dev/null 2>&1; then
-                NOTES+=("- extra fix \`$title\` ($s7 from \`$br\`): added")
-              else
-                git cherry-pick --abort 2>/dev/null || git reset -q --hard
-                echo "::warning::Extra fix '$title' does not apply cleanly. Skipped."
-                NOTES+=("- **Warning:** extra fix \`$title\` ($s7 from \`$br\`) does not apply cleanly, skipped")
-              fi
-            done
-          }
-
-          merge_branches
-
-          # If dash's branch could not be merged onto the newest official master at all,
-          # build it exactly as dash has it (his own tested state) instead of failing.
-          if [ "${#CONFLICT_BRANCHES[@]}" -gt 0 ] && [ "$MERGED_ANY" = "0" ]; then
-            fb=${CONFLICT_BRANCHES[0]}
-            git checkout -q -B combined "refs/remotes/dash/$fb"
-            MODE="fallback"
-            DASH7=$(git rev-parse --short=7 HEAD)
-            echo "::warning::FALLBACK build: dash's '$fb' exactly as he has it, WITHOUT the newest official changes."
-            NOTES+=("- **FALLBACK:** built dash's \`$fb\` exactly as he has it, WITHOUT the newest official changes, because it no longer merges cleanly onto official master")
           fi
 
-          apply_extra_fixes
-
-          # ---- C. name the result -------------------------------------------
-          TREE=$(git rev-parse "HEAD^{tree}")
-          TAG="build-${TREE:0:12}"
-
-          val() { grep -m1 -E "^#define $1[[:space:]]" OptiScaler/resource.h | tr -d '\r' | awk '{print $3}'; }
-          VERSION="v$(val VER_MAJOR_VERSION).$(val VER_MINOR_VERSION).$(val VER_HOTFIX_VERSION)-pre$(val VER_BUILD_NUMBER)"
-
-          if   [ "$MODE" = "fallback" ];  then LABEL="FALLBACK-dash-$DASH7"; WHAT="dash only, FALLBACK"
-          elif [ "$MERGED_ANY" = "1" ];   then LABEL="official-${UP7}_dash-${DASH7}"; WHAT="official + dash"
-          else                                 LABEL="official-${UP7}"; WHAT="official only"
-          fi
-          DATE=$(date -u +%Y%m%d)
-          NAME="OptiScaler_${VERSION}_${DATE}_${LABEL}"
-          TITLE="OptiScaler ${VERSION} (${WHAT}), built $(date -u +%Y-%m-%d) [${LABEL}]"
-
-          # ---- D. daily runs: stop here if nothing changed since the last build ----
-          SKIP=false
-          if [ "${GITHUB_EVENT_NAME}" = "schedule" ] && gh release view "$TAG" >/dev/null 2>&1; then
-            SKIP=true
-            echo "Nothing new since the last build ($TAG). Skipping the build."
+          if [ "$MERGED" = "none" ]; then
+            echo "::warning::No dashdogy branch was merged. This will be a plain upstream build."
           fi
 
-          # ---- E. write the release notes ------------------------------------
-          NOTES_FILE="$GITHUB_WORKSPACE/release-notes.md"
-          {
-            echo "Unofficial combined build. Not supported by the OptiScaler team, so please don't report problems with it to them."
-            echo
-            echo "- Built: $(date -u '+%Y-%m-%d %H:%M UTC')"
-            echo "- Official OptiScaler master: [$UP7](https://github.com/${UPSTREAM_REPO}/commit/${UP_SHA}) from $UP_DATE, \"$UP_TITLE\""
-            echo
-            echo "What was added on top of official:"
-            if [ "${#NOTES[@]}" -eq 0 ]; then
-              echo "- nothing (plain official build)"
-            else
-              printf '%s\n' "${NOTES[@]}"
-            fi
-          } > "$NOTES_FILE"
-          cat "$NOTES_FILE"
-          { echo "## $TITLE"; echo; cat "$NOTES_FILE"; } >> "$GITHUB_STEP_SUMMARY"
+          # A merge can move submodule pointers, so make sure they match the merged result
+          git submodule sync --recursive
+          git submodule update --init --recursive
 
           {
-            echo "skip=$SKIP"
-            echo "name=$NAME"
-            echo "tag=$TAG"
-            echo "title=$TITLE"
+            echo "up_full=$UP_FULL"
+            echo "up_short=$UP_SHORT"
+            echo "dash_full=$DASH_FULL"
+            echo "dash_short=$DASH_SHORT"
+            echo "merged=$MERGED"
+            echo "key=$UP_SHORT-$DASH_SHORT"
           } >> "$GITHUB_OUTPUT"
 
-      - name: 3. Make sure helper libraries match the merged code
-        if: steps.merge.outputs.skip != 'true'
-        shell: bash
-        working-directory: src
-        run: |
-          git submodule sync --recursive
-          git submodule update --init --recursive --force
-
-      - name: 4. Set up MSBuild
-        if: steps.merge.outputs.skip != 'true'
-        uses: microsoft/setup-msbuild@v3
-
-      - name: 5. Build
-        if: steps.merge.outputs.skip != 'true'
-        working-directory: src
-        run: msbuild /m /p:Configuration=Release . /verbosity:minimal
-
-      - name: 6. Pack the result into one .7z file
-        if: steps.merge.outputs.skip != 'true'
-        shell: pwsh
-        env:
-          ARCHIVE_NAME: ${{ steps.merge.outputs.name }}
-        run: |
-          $out = Join-Path $env:GITHUB_WORKSPACE 'src\x64\Release\a'
-          if (-not (Test-Path (Join-Path $out 'OptiScaler.dll'))) {
-            Write-Error "Build finished but OptiScaler.dll was not found in $out"
-            exit 1
-          }
-          $archive = Join-Path $env:GITHUB_WORKSPACE "$($env:ARCHIVE_NAME).7z"
-          Push-Location $out
-          7z a -t7z -r $archive *
-          $code = $LASTEXITCODE
-          Pop-Location
-          if ($code -ne 0) { exit $code }
-
-      - name: 7. Keep the .7z as a run artifact (kept 7 days)
-        if: steps.merge.outputs.skip != 'true'
-        uses: actions/upload-artifact@v7.0.0
-        with:
-          name: ${{ steps.merge.outputs.name }}
-          path: ${{ github.workspace }}\${{ steps.merge.outputs.name }}.7z
-          archive: false
-          compression-level: 0
-          retention-days: 7
-          if-no-files-found: error
-
-      - name: 8. Publish a Release (permanent download, newest 10 kept)
-        if: steps.merge.outputs.skip != 'true'
+      - name: Skip if this exact combination was already built
+        id: check
         shell: bash
         env:
-          ARCHIVE_NAME: ${{ steps.merge.outputs.name }}
-          TAG: ${{ steps.merge.outputs.tag }}
-          TITLE: ${{ steps.merge.outputs.title }}
+          KEY: ${{ steps.merge.outputs.key }}
         run: |
           set -uo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release delete "$TAG" --cleanup-tag --yes
+          EXISTING=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' | tr -d '\r' | grep -- "-$KEY\$" || true)
+          if [ -n "$EXISTING" ] && [ "$FORCE" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Already built as $EXISTING, nothing new upstream or from dashdogy. Skipping."
+            echo "### Nothing new to build" >> "$GITHUB_STEP_SUMMARY"
+            echo "The latest build (\`$EXISTING\`) already has the newest upstream master and dashdogy branch." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
-          gh release create "$TAG" "$GITHUB_WORKSPACE/$ARCHIVE_NAME.7z" \
-            --prerelease --title "$TITLE" --notes-file "$GITHUB_WORKSPACE/release-notes.md"
+          TAG="build-$(date -u +%Y%m%d)-$KEY"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            TAG="$TAG-r$GITHUB_RUN_NUMBER"
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-          # Tidy up: delete builds older than the newest 10 (only releases this workflow made).
-          gh release list --limit 100 --json tagName,createdAt \
-            --jq '[.[] | select(.tagName | startswith("build-"))] | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' \
-            | tr -d '\r' | while read -r old; do
-                [ -n "$old" ] && gh release delete "$old" --cleanup-tag --yes
+      - name: Set up MSBuild
+        if: steps.check.outputs.skip != 'true'
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build OptiScaler (Release, x64)
+        if: steps.check.outputs.skip != 'true'
+        shell: pwsh
+        working-directory: src
+        run: msbuild OptiScaler.sln /restore /m /v:minimal /p:Configuration=Release /p:Platform=x64
+
+      - name: Collect the DLL and make the package
+        if: steps.check.outputs.skip != 'true'
+        shell: pwsh
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+          UP_FULL: ${{ steps.merge.outputs.up_full }}
+          DASH_FULL: ${{ steps.merge.outputs.dash_full }}
+          MERGED: ${{ steps.merge.outputs.merged }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # --- find the DLL we just built ---
+          $dll = Get-ChildItem -Path src -Recurse -Filter OptiScaler.dll -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -notmatch '[\\/]external[\\/]' } |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $dll) {
+            Write-Host "OptiScaler.dll not found. DLLs written during this build:"
+            Get-ChildItem -Path src -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
+              Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-90) } |
+              ForEach-Object { Write-Host "  $($_.FullName)" }
+            throw "The build finished but OptiScaler.dll was not produced"
+          }
+          Write-Host "Built: $($dll.FullName)"
+
+          New-Item -ItemType Directory -Force -Path dist, meta | Out-Null
+          Copy-Item $dll.FullName dist\OptiScaler.dll
+
+          $info = @(
+            "OptiScaler custom build",
+            "Built (UTC)     : $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm'))",
+            "Upstream master : https://github.com/optiscaler/OptiScaler/commit/$env:UP_FULL",
+            "dashdogy branch : $env:MERGED",
+            "dashdogy commit : $(if ($env:DASH_FULL -ne 'none') { "https://github.com/dashdogy/OptiScaler/commit/$env:DASH_FULL" } else { 'none' })",
+            "Workflow run    : $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            "License         : GPL-3.0 (same as OptiScaler)"
+          )
+
+          # --- try to build a full package: latest official nightly + our DLL ---
+          $mode = 'dll-only'
+          $nightlyTag = $null
+          try {
+            $nightlyTag = (gh release list --repo optiscaler/OptiScaler-nightly --limit 1 --json tagName --jq '.[0].tagName')
+            if ($LASTEXITCODE -ne 0 -or -not $nightlyTag) { throw "could not find the latest nightly" }
+            Write-Host "Latest official nightly: $nightlyTag"
+
+            New-Item -ItemType Directory -Force -Path base | Out-Null
+            gh release download $nightlyTag --repo optiscaler/OptiScaler-nightly --pattern '*.7z' --dir base --clobber
+            if ($LASTEXITCODE -ne 0 -or -not (Get-ChildItem base -Filter *.7z)) {
+              gh release download $nightlyTag --repo optiscaler/OptiScaler-nightly --pattern '*.zip' --dir base --clobber
+            }
+            $archive = Get-ChildItem base -File | Where-Object { $_.Extension -in '.7z', '.zip' } | Select-Object -First 1
+            if (-not $archive) { throw "no .7z/.zip asset on the nightly release" }
+
+            7z x $archive.FullName -obase\x -y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "could not extract $($archive.Name)" }
+
+            $targets = Get-ChildItem base\x -Recurse -Filter OptiScaler.dll
+            if (-not $targets) { throw "no OptiScaler.dll inside the nightly package" }
+            foreach ($t in $targets) { Copy-Item $dll.FullName $t.FullName -Force; Write-Host "Replaced $($t.FullName)" }
+
+            $info | Set-Content base\x\BUILD_INFO.txt
+            $out = "dist\OptiScaler_custom_$env:TAG.7z"
+            Push-Location base\x
+            7z a -t7z -mx=5 "$env:GITHUB_WORKSPACE\$out" * | Out-Null
+            $rc = $LASTEXITCODE
+            Pop-Location
+            if ($rc -ne 0) { throw "7z failed to create the package" }
+            $mode = "full (official $nightlyTag + our OptiScaler.dll)"
+          }
+          catch {
+            Write-Host "::warning::Full package not made ($($_.Exception.Message)). Publishing a DLL-only package instead."
+            Remove-Item dist\OptiScaler_custom_*.7z -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force -Path pkg | Out-Null
+            Copy-Item $dll.FullName pkg\OptiScaler.dll
+            if (Test-Path src\OptiScaler.ini) { Copy-Item src\OptiScaler.ini pkg\OptiScaler.ini }
+            $info | Set-Content pkg\BUILD_INFO.txt
+            Push-Location pkg
+            7z a -t7z -mx=5 "$env:GITHUB_WORKSPACE\dist\OptiScaler_custom_${env:TAG}_dll-only.7z" * | Out-Null
+            Pop-Location
+          }
+          $mode | Set-Content meta\package-mode.txt
+          Write-Host "Package mode: $mode"
+          Get-ChildItem dist | ForEach-Object { Write-Host "  $($_.Name)  ($([math]::Round($_.Length/1MB,1)) MB)" }
+          exit 0
+
+      - name: Publish release
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+          UP_FULL: ${{ steps.merge.outputs.up_full }}
+          UP_SHORT: ${{ steps.merge.outputs.up_short }}
+          DASH_FULL: ${{ steps.merge.outputs.dash_full }}
+          MERGED: ${{ steps.merge.outputs.merged }}
+        run: |
+          set -euo pipefail
+          MODE=$(tr -d '\r' < meta/package-mode.txt)
+          {
+            echo "Automatic build of the latest **optiscaler/OptiScaler** master with **dashdogy/OptiScaler** merged on top."
+            echo
+            echo "- Upstream master: [\`$UP_SHORT\`](https://github.com/optiscaler/OptiScaler/commit/$UP_FULL)"
+            if [ "$DASH_FULL" != "none" ]; then
+              echo "- dashdogy branch: \`$MERGED\` ([commit](https://github.com/dashdogy/OptiScaler/commit/$DASH_FULL))"
+            else
+              echo "- dashdogy branch: **none merged (plain upstream build)**"
+            fi
+            echo "- Package: $MODE"
+            echo
+            echo "Merge log:"
+            cat meta/merge-notes.md
+            echo
+            echo "How to use: extract the .7z and install like normal OptiScaler. Or download just \`OptiScaler.dll\` and swap it into an existing install (keep whatever filename it was installed under, e.g. dxgi.dll)."
+            echo
+            echo "Unsigned build. The official releases are code-signed, this one is not. OptiScaler is GPL-3.0; source is the two commits linked above."
+          } > meta/release-notes.md
+
+          TITLE="OptiScaler custom build $(date -u +%Y-%m-%d) (upstream $UP_SHORT + dashdogy: $MERGED)"
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes-file meta/release-notes.md
+
+          URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          {
+            echo "### Build done"
+            echo "**Download:** $URL"
+            echo
+            echo "- Upstream master: \`$UP_SHORT\`"
+            echo "- dashdogy: \`$MERGED\`"
+            echo "- Package: $MODE"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete old builds
+        if: steps.check.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -uo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
+            --jq 'map(select(.tagName | startswith("build-"))) | sort_by(.createdAt) | reverse | .[].tagName' \
+            | tr -d '\r' \
+            | tail -n +$((KEEP_RELEASES + 1)) \
+            | while read -r old; do
+                [ -z "$old" ] && continue
+                echo "Deleting old build $old"
+                gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
               done
           exit 0
