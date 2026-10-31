@@ -93,8 +93,10 @@ name: Opti Morning (combined build)
 
 on:
   schedule:
-    # 06:15 UTC every day, about 2 hours after upstream's own nightly build.
-    - cron: "15 6 * * *"
+    # 06:00 in UTC+7
+    - cron: "0 23 * * *"
+    # 16:00 in UTC+7
+    - cron: "0 9 * * *"
   workflow_dispatch:
     inputs:
       upstream_ref:
