@@ -20,6 +20,8 @@
 #  WHAT IS INSIDE THE 7Z
 #       OptiScaler.dll, OptiScaler.ini, ...         the normal nightly files
 #       OptiScaler/                                 the normal nightly folder
+#         Streamlined_fetcher_windows.bat           copied from the OptiScaler
+#                                                   source, as in the nightlies
 #         plugins/MFGUnlocker.asi                   MFGUnlocker.dll, renamed
 #         custom/NvngxXeFG/dlssg/
 #           dlssg_to_xefg_intel_is_better.dll       built from FakeMichau's repo
@@ -316,11 +318,12 @@ jobs:
           STAGE="$GITHUB_WORKSPACE/stage"
           BUILT="src/x64/Release/a"
           DLSSG_DLL="dlssg/bin/Release/dlssg_to_xefg_intel_is_better.dll"
+          FETCHER_BAT="src/Streamlined_fetcher_windows.bat"
           PLUGINS="$STAGE/OptiScaler/plugins"
           DLSSG_DIR="$STAGE/OptiScaler/custom/NvngxXeFG/dlssg"
 
           # Everything we need must exist, or we stop here.
-          for p in "$BUILT/OptiScaler.dll" "$BUILT/OptiScaler" "$DLSSG_DLL" mfg/MFGUnlocker.dll; do
+          for p in "$BUILT/OptiScaler.dll" "$BUILT/OptiScaler" "$DLSSG_DLL" mfg/MFGUnlocker.dll "$FETCHER_BAT"; do
             [ -e "$p" ] || { echo "::error::Missing build output: $p"; ls -la "$(dirname "$p")" || true; exit 1; }
           done
 
@@ -329,6 +332,10 @@ jobs:
           cp -a "$BUILT/." "$STAGE/"
           cp mfg/MFGUnlocker.dll "$PLUGINS/MFGUnlocker.asi"
           cp "$DLSSG_DLL" "$DLSSG_DIR/"
+
+          # The official nightlies also ship Streamlined_fetcher_windows.bat inside
+          # the OptiScaler folder (their workflow copies it from the repo root).
+          cp "$FETCHER_BAT" "$STAGE/OptiScaler/"
 
           # dlssg-to-xefg also needs a COPY of every libxe*.dll next to it.
           LIBS=("$STAGE"/OptiScaler/libxe*.dll)
@@ -341,7 +348,7 @@ jobs:
           fi
 
           echo "Added to the package:"
-          find "$PLUGINS" "$DLSSG_DIR" -type f | sed "s|^$STAGE/||"
+          find "$PLUGINS" "$DLSSG_DIR" "$STAGE/OptiScaler/Streamlined_fetcher_windows.bat" -type f | sed "s|^$STAGE/||"
 
           (cd "$STAGE" && 7z a -r "$OUT/$FILENAME.7z" '*' > /dev/null)
           ls -la "$OUT/$FILENAME.7z"
@@ -373,6 +380,7 @@ jobs:
 
             printf '### Package\n\n'
             printf -- '- `%s.7z`: the same layout as the official nightlies (`OptiScaler.dll`, `OptiScaler.ini` and so on, next to the `OptiScaler` folder), plus the files above.\n' "$FILENAME"
+            printf -- '- `OptiScaler/Streamlined_fetcher_windows.bat`: the fetcher script the official nightlies ship too, copied from the OptiScaler source.\n'
             if [ "$HAS_PATCH" = "true" ]; then
               printf -- '- `OptiScaler/combined-source.patch`: the exact OptiScaler source changes on top of upstream `%s` (GPL-3.0 source).\n\n' "$UP_SHORT"
               printf 'The version string inside the game shows commit `%s`. That hash only exists in this build, it is not an upstream commit.\n' "$HEAD_SHORT"
