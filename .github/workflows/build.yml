@@ -123,10 +123,10 @@ name: Opti Morning (combined build)
 
 on:
   schedule:
-    # 06:00 in UTC+7
-    - cron: "0 23 * * *"
-    # 16:00 in UTC+7
-    - cron: "0 9 * * *"
+    - cron: "0 0 * * *"
+    - cron: "0 6 * * *"
+    - cron: "0 12 * * *"
+    - cron: "0 18 * * *"
   workflow_dispatch:
     inputs:
       upstream_ref:
