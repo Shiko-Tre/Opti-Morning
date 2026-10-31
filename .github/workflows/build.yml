@@ -1,28 +1,54 @@
 # =============================================================================
-#  OptiScaler + dashdogy  --  automatic combined build
+#  Opti Morning  --  automatic combined build
 # =============================================================================
 #
 #  What this does, every day (and whenever you press "Run workflow"):
 #    1. Takes the latest official OptiScaler code (the same code the nightlies
 #       are built from).
-#    2. Adds dashdogy's work that is NOT in official OptiScaler yet:
+#    2. Adds dashdogy's OptiScaler work that is NOT in official OptiScaler yet:
 #         - pull request #1240  (XeFG on Vulkan)
 #         - commit 6089672c     (menu/overlay + FSR-FG present fix, "pairfix.1")
-#    3. Builds OptiScaler.dll on a Windows machine.
-#    4. Publishes it on the Releases tab of THIS repository.
+#    3. Builds OptiScaler on a Windows machine.
+#    4. Builds FakeMichau's dlssg-to-xefg from source
+#       -> dlssg_to_xefg_intel_is_better.dll
+#    5. Downloads the latest official MFG Unlocker release from dashdogy
+#       -> MFGUnlocker.dll (see the note below about why it is not built)
+#    6. Puts everything into ONE 7z, laid out like this:
+#
+#         OptiScaler.dll, OptiScaler.ini, ...        (the normal nightly files)
+#         OptiScaler/                                (the normal nightly folder)
+#           plugins/MFGUnlocker.asi                  (MFGUnlocker.dll, renamed)
+#           custom/NvngxXeFG/dlssg/
+#             dlssg_to_xefg_intel_is_better.dll
+#             libxe*.dll                             (copies, not moved)
+#           combined-source.patch                    (GPL source, see Licence)
+#
+#    7. Publishes that 7z as a normal release on the Releases tab of THIS
+#       repository, titled "Opti Morning <date> (<upstream commit>)".
+#
+#  Why MFG Unlocker is downloaded and not built:
+#    Its BUILD.md says a source checkout alone cannot produce the DLL. It also
+#    needs separately prepared inputs (the XeSS Frame Generation program set and
+#    the SM86 kernel caches) that are not in the repository. So the workflow
+#    takes the DLL from the official release instead, unmodified.
 #
 #  Safety rules built in:
-#    - If nothing changed since the last build, it does nothing (no duplicate).
-#    - If dashdogy's changes no longer fit the newest upstream code, the run
-#      FAILS (red X, you get an email) and NO release is published. The
+#    - If nothing changed since the last build (same upstream commit, same PR
+#      head, same MFG Unlocker release, same dlssg-to-xefg commit), it does
+#      nothing (no duplicate).
+#    - If dashdogy's OptiScaler changes no longer fit the newest upstream code,
+#      the run FAILS (red X, you get an email) and NO release is published. The
 #      previous release stays available.
-#    - If upstream later merges one of these changes itself, the workflow
-#      notices and stops adding it. If everything is upstream, it stops building.
+#    - If any download or build fails, or an expected file is missing, the run
+#      fails the same way. Nothing half-built is published.
+#    - If upstream later merges one of dashdogy's changes itself, the workflow
+#      notices and stops adding it. The build still goes on, because MFG
+#      Unlocker and dlssg-to-xefg are still part of the package.
 #
 #  HOW TO USE (first time)
 #    1. Create a new PUBLIC repository on GitHub (public = free build minutes).
-#    2. Put this file at:   .github/workflows/build-combined.yml
-#    3. Actions tab -> "OptiScaler + dashdogy (combined build)" -> Run workflow.
+#    2. Put this file in .github/workflows/ (for example build.yml).
+#    3. Actions tab -> "Opti Morning (combined build)" -> Run workflow.
 #    4. After ~15-25 minutes the build appears under "Releases".
 #
 #    Only if the run fails when publishing with "Resource not accessible by
@@ -34,12 +60,14 @@
 #  Heads-up: GitHub pauses scheduled workflows in a repository that has had no
 #  commits for 60 days. If that happens, GitHub emails you; click "Enable".
 #
-#  Licence: OptiScaler is GPL-3.0. Every release includes combined-source.patch
-#  (exact changes on top of the named upstream commit) so the source is
-#  available alongside the binary.
+#  Licence: OptiScaler and dlssg-to-xefg are GPL-3.0. Every package includes
+#  OptiScaler/combined-source.patch (exact OptiScaler changes on top of the named
+#  upstream commit) whenever the build differs from upstream, and the release
+#  notes name the exact dlssg-to-xefg commit. MFGUnlocker.dll is MIT, but embeds
+#  Intel XeSS program data that stays under Intel's terms (see its NOTICE.md).
 # =============================================================================
 
-name: OptiScaler + dashdogy (combined build)
+name: Opti Morning (combined build)
 
 on:
   schedule:
@@ -76,6 +104,13 @@ env:
   # One FULL 40-character commit ID per line; text after # is a comment.
   EXTRA_COMMITS: |
     6089672c10b13e8aaca50b94ee1bfc2b51c70d30  # pairfix.1: menu/overlay allocator ring + FSR-FG present while FG is off
+
+  # dashdogy's MFG Unlocker: the DLL is taken from its latest release.
+  MFG_REPO: dashdogy/MFG-Unlocker
+
+  # FakeMichau's dlssg-to-xefg: built from this branch (or tag, or commit).
+  DLSSG_REPO: FakeMichau/dlssg-to-xefg
+  DLSSG_REF: master
 
   # How many combined releases to keep (older ones are deleted). 0 = keep all.
   KEEP_RELEASES: "20"
@@ -121,7 +156,20 @@ jobs:
           UP_DATE=$(git log -1 --format=%cs)
           echo "Upstream: $UP_SHORT  $UP_SUBJECT  ($UP_DATE)"
 
-          # ---- 1. Is the pull request still open upstream? -------------------
+          # ---- 1. The other two parts: MFG Unlocker and dlssg-to-xefg --------
+          MFG_TAG=$(gh release view --repo "$MFG_REPO" --json tagName --jq '.tagName') || {
+            echo "::error::Could not read the latest release of $MFG_REPO."
+            exit 1
+          }
+          DLSSG_SHA=$(gh api "repos/$DLSSG_REPO/commits/$DLSSG_REF" --jq '.sha') || {
+            echo "::error::Could not read $DLSSG_REF of $DLSSG_REPO."
+            exit 1
+          }
+          DLSSG_SUBJECT=$(gh api "repos/$DLSSG_REPO/commits/$DLSSG_REF" --jq '.commit.message | split("\n")[0]')
+          echo "MFG Unlocker: $MFG_TAG"
+          echo "dlssg-to-xefg: ${DLSSG_SHA:0:8}  $DLSSG_SUBJECT"
+
+          # ---- 2. Is the pull request still open upstream? -------------------
           PR_STATE=$(gh api "repos/$UPSTREAM_REPO/pulls/$PR_NUMBER" --jq '.state')
           PR_MERGED=$(gh api "repos/$UPSTREAM_REPO/pulls/$PR_NUMBER" --jq '.merged')
           PR_TITLE=$(gh api "repos/$UPSTREAM_REPO/pulls/$PR_NUMBER" --jq '.title')
@@ -137,7 +185,7 @@ jobs:
             PR_HEAD=$(git rev-parse "refs/remotes/pr/$PR_NUMBER")
           fi
 
-          # ---- 2. Read and check the extra commit list -----------------------
+          # ---- 3. Read and check the extra commit list -----------------------
           EXTRAS=""
           while IFS= read -r line; do
             line="${line%%#*}"
@@ -150,8 +198,8 @@ jobs:
             EXTRAS="$EXTRAS $line"
           done <<< "$EXTRA_COMMITS"
 
-          # ---- 3. Same inputs as an existing release? Then nothing to do -----
-          FP=$(printf '%s\n' "$UP_SHA" "$PR_HEAD" $EXTRAS | sha1sum | cut -c1-12)
+          # ---- 4. Same inputs as an existing release? Then nothing to do -----
+          FP=$(printf '%s\n' "$UP_SHA" "$PR_HEAD" $EXTRAS "$MFG_TAG" "$DLSSG_SHA" | sha1sum | cut -c1-12)
           TAG="build-$FP"
           echo "Fingerprint $FP  (release tag $TAG)"
 
@@ -160,14 +208,14 @@ jobs:
               echo "::notice::Nothing new since the last build ($TAG already exists). Nothing to do."
               {
                 echo "### Nothing to do"
-                echo "Upstream \`$UP_SHORT\` + the same dashdogy changes were already built as release \`$TAG\`."
+                echo "Upstream \`$UP_SHORT\`, the same dashdogy changes, MFG Unlocker \`$MFG_TAG\` and dlssg-to-xefg \`${DLSSG_SHA:0:8}\` were already built as release \`$TAG\`."
               } >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             echo "Force rebuild requested: the existing release $TAG will be replaced."
           fi
 
-          # ---- 4. Merge everything onto upstream -----------------------------
+          # ---- 5. Merge everything onto upstream -----------------------------
           git config user.name  "combined-build"
           git config user.email "combined-build@users.noreply.github.com"
 
@@ -224,45 +272,89 @@ jobs:
           done
 
           if [ "$ADDED" -eq 0 ]; then
-            echo "::notice::Upstream already contains everything this workflow adds. Use the official nightly instead."
-            {
-              echo "### Nothing to add"
-              echo "Upstream \`$UP_SHORT\` already contains all of dashdogy's changes listed here. The official nightly is enough."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+            echo "::notice::Upstream already contains every OptiScaler change listed here. Building anyway, for MFG Unlocker and dlssg-to-xefg."
           fi
 
-          # ---- 5. Record the exact source change (GPL source offer) ----------
+          # ---- 6. Record the exact source change (GPL source offer) ----------
           git diff --binary "$UP_SHA" HEAD > "$OUT/combined-source.patch"
           HEAD_SHORT=$(git rev-parse --short HEAD)
+          HAS_PATCH=false
+          if [ -s "$OUT/combined-source.patch" ]; then
+            HAS_PATCH=true
+          fi
 
-          # ---- 6. Version and file names (same scheme as upstream) -----------
+          # ---- 7. Version and file names -------------------------------------
           ver() { grep -m1 -E "^#define $1[[:space:]]" OptiScaler/resource.h | awk '{print $3}' | tr -d '\r'; }
           VERSION="v$(ver VER_MAJOR_VERSION).$(ver VER_MINOR_VERSION).$(ver VER_HOTFIX_VERSION)-pre$(ver VER_BUILD_NUMBER)"
           if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-pre[0-9]+$ ]]; then
             echo "::error::Could not read the version from OptiScaler/resource.h (got '$VERSION')."
             exit 1
           fi
-          FILENAME="OptiScaler_${VERSION}_$(date -u +%Y%m%d)_dashdogy"
+          FILENAME="OptiMorning_${VERSION}_$(date -u +%Y%m%d)"
 
           {
             echo "build=true"
             echo "tag=$TAG"
             echo "version=$VERSION"
             echo "filename=$FILENAME"
+            echo "up_sha=$UP_SHA"
             echo "up_short=$UP_SHORT"
             echo "up_subject=$UP_SUBJECT"
             echo "up_date=$UP_DATE"
             echo "head_short=$HEAD_SHORT"
+            echo "has_patch=$HAS_PATCH"
+            echo "mfg_tag=$MFG_TAG"
+            echo "dlssg_sha=$DLSSG_SHA"
+            echo "dlssg_subject=$DLSSG_SUBJECT"
           } >> "$GITHUB_OUTPUT"
 
           {
             echo "### Plan"
-            echo "- Upstream: \`$UP_SHORT\` ($UP_DATE) $UP_SUBJECT"
+            echo "- OptiScaler upstream: \`$UP_SHORT\` ($UP_DATE) $UP_SUBJECT"
             echo "- Version: $VERSION"
-            echo "- Added on top:"
+            echo "- dashdogy, OptiScaler changes on top:"
             sed 's/^/  /' "$INCLUDED"
+            echo "- dashdogy, MFG Unlocker: \`$MFG_TAG\` (official release DLL)"
+            echo "- FakeMichau, dlssg-to-xefg: \`${DLSSG_SHA:0:8}\` $DLSSG_SUBJECT"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check out dlssg-to-xefg
+        if: steps.plan.outputs.build == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.DLSSG_REPO }}
+          ref: ${{ steps.plan.outputs.dlssg_sha }}
+          path: dlssg
+
+      - name: Download MFG Unlocker (official release)
+        if: steps.plan.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MFG_TAG: ${{ steps.plan.outputs.mfg_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p mfg/x
+
+          # The release normally holds a ZIP with MFGUnlocker.dll inside.
+          # If it holds the bare DLL instead, take that.
+          if gh release download "$MFG_TAG" --repo "$MFG_REPO" --pattern '*.zip' --dir mfg 2> /dev/null; then
+            for z in mfg/*.zip; do
+              7z x -y "-omfg/x" "$z" > /dev/null
+            done
+          else
+            gh release download "$MFG_TAG" --repo "$MFG_REPO" --pattern 'MFGUnlocker.dll' --dir mfg/x
+          fi
+
+          DLL=$(find mfg/x -type f -iname 'MFGUnlocker.dll' | head -n 1)
+          if [ -z "$DLL" ]; then
+            echo "::error::MFGUnlocker.dll was not found in release $MFG_TAG of $MFG_REPO."
+            find mfg -type f
+            exit 1
+          fi
+          if [ "$DLL" != "mfg/x/MFGUnlocker.dll" ]; then
+            cp "$DLL" mfg/x/MFGUnlocker.dll
+          fi
+          ls -la mfg/x/MFGUnlocker.dll
 
       - name: Fetch libraries (submodules)
         if: steps.plan.outputs.build == 'true'
@@ -273,62 +365,133 @@ jobs:
         if: steps.plan.outputs.build == 'true'
         uses: microsoft/setup-msbuild@v3
 
-      - name: Build (Release x64)
+      - name: Build OptiScaler (Release x64)
         if: steps.plan.outputs.build == 'true'
         working-directory: src
         shell: pwsh
         run: msbuild /m /p:Configuration=Release /verbosity:minimal OptiScaler.sln
+
+      - name: Build dlssg-to-xefg (Release x64)
+        if: steps.plan.outputs.build == 'true'
+        working-directory: dlssg
+        shell: pwsh
+        run: msbuild /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal dlssg-to-xefg.sln
 
       - name: Package
         id: package
         if: steps.plan.outputs.build == 'true'
         env:
           FILENAME: ${{ steps.plan.outputs.filename }}
+          HAS_PATCH: ${{ steps.plan.outputs.has_patch }}
         run: |
           set -euo pipefail
+          shopt -s nocaseglob nullglob
+
           OUT="$GITHUB_WORKSPACE/out"
           BUILT="src/x64/Release/a"
+          STAGE="$GITHUB_WORKSPACE/stage"
+          MFG_DLL="mfg/x/MFGUnlocker.dll"
+          DLSSG_DLL="dlssg/bin/Release/dlssg_to_xefg_intel_is_better.dll"
 
+          # ---- Everything we need must exist, or we stop here ----------------
           if [ ! -f "$BUILT/OptiScaler.dll" ]; then
             echo "::error::The build finished but $BUILT/OptiScaler.dll is missing."
             ls -la "$BUILT" || true
             exit 1
           fi
+          if [ ! -d "$BUILT/OptiScaler" ]; then
+            echo "::error::Expected an OptiScaler folder next to OptiScaler.dll in $BUILT, but there is none."
+            ls -la "$BUILT" || true
+            exit 1
+          fi
+          if [ ! -f "$DLSSG_DLL" ]; then
+            echo "::error::The dlssg-to-xefg build finished but $DLSSG_DLL is missing."
+            ls -la dlssg/bin/Release || true
+            exit 1
+          fi
+          if [ ! -f "$MFG_DLL" ]; then
+            echo "::error::$MFG_DLL is missing."
+            exit 1
+          fi
 
-          cp "$BUILT/OptiScaler.dll" "$OUT/OptiScaler.dll"
-          (cd "$BUILT" && 7z a -r "$OUT/$FILENAME.7z" '*' > /dev/null)
+          # ---- Start from the normal nightly layout --------------------------
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          cp -a "$BUILT/." "$STAGE/"
 
-          echo "sha256=$(sha256sum "$OUT/OptiScaler.dll" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          ls -la "$OUT"
+          # ---- MFG Unlocker: renamed to .asi into OptiScaler/plugins ---------
+          mkdir -p "$STAGE/OptiScaler/plugins"
+          cp "$MFG_DLL" "$STAGE/OptiScaler/plugins/MFGUnlocker.asi"
+
+          # ---- dlssg-to-xefg + a COPY of every libxe*.dll --------------------
+          DLSSG_DIR="$STAGE/OptiScaler/custom/NvngxXeFG/dlssg"
+          mkdir -p "$DLSSG_DIR"
+          cp "$DLSSG_DLL" "$DLSSG_DIR/"
+
+          LIBS=("$STAGE"/OptiScaler/libxe*.dll)
+          if [ "${#LIBS[@]}" -eq 0 ]; then
+            echo "::error::No libxe*.dll found in the OptiScaler folder of the build output, so there is nothing to copy next to dlssg_to_xefg_intel_is_better.dll."
+            ls -la "$STAGE/OptiScaler" || true
+            exit 1
+          fi
+          cp "${LIBS[@]}" "$DLSSG_DIR/"
+
+          # ---- GPL source patch (only when the build differs from upstream) --
+          if [ "$HAS_PATCH" = "true" ]; then
+            cp "$OUT/combined-source.patch" "$STAGE/OptiScaler/combined-source.patch"
+          fi
+
+          echo "Added to the package:"
+          find "$STAGE/OptiScaler/plugins" "$DLSSG_DIR" -type f | sed "s|^$STAGE/||"
+
+          # ---- One 7z with everything ----------------------------------------
+          (cd "$STAGE" && 7z a -r "$OUT/$FILENAME.7z" '*' > /dev/null)
+          ls -la "$OUT/$FILENAME.7z"
 
       - name: Publish release
         if: steps.plan.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          FORCE: ${{ inputs.force }}
           TAG: ${{ steps.plan.outputs.tag }}
           VERSION: ${{ steps.plan.outputs.version }}
           FILENAME: ${{ steps.plan.outputs.filename }}
+          UP_SHA: ${{ steps.plan.outputs.up_sha }}
           UP_SHORT: ${{ steps.plan.outputs.up_short }}
           UP_SUBJECT: ${{ steps.plan.outputs.up_subject }}
           UP_DATE: ${{ steps.plan.outputs.up_date }}
           HEAD_SHORT: ${{ steps.plan.outputs.head_short }}
-          SHA256: ${{ steps.package.outputs.sha256 }}
+          HAS_PATCH: ${{ steps.plan.outputs.has_patch }}
+          MFG_TAG: ${{ steps.plan.outputs.mfg_tag }}
+          DLSSG_SHA: ${{ steps.plan.outputs.dlssg_sha }}
+          DLSSG_SUBJECT: ${{ steps.plan.outputs.dlssg_subject }}
         run: |
           set -euo pipefail
           OUT="$GITHUB_WORKSPACE/out"
           NOTES="$OUT/notes.md"
 
           {
-            printf '**Unofficial combined build.** Official OptiScaler `%s` (%s, "%s") plus dashdogy'"'"'s changes that are not in official OptiScaler yet. Do not report problems with this build to the OptiScaler team.\n\n' "$UP_SHORT" "$UP_DATE" "$UP_SUBJECT"
-            printf '### Added on top of upstream\n\n'
+            printf '**Unofficial combined build.** Do not report problems with this build to the OptiScaler team or to the authors of the parts added below.\n\n'
+
+            printf '### OptiScaler nightly\n\n'
+            printf -- '- Official OptiScaler `%s`, upstream commit [`%s`](https://github.com/%s/commit/%s) (%s): "%s"\n' "$VERSION" "$UP_SHORT" "$UPSTREAM_REPO" "$UP_SHA" "$UP_DATE" "$UP_SUBJECT"
+            printf -- '- This is the same code the official nightlies are built from. The two sections below are added on top of it.\n\n'
+
+            printf '### dashdogy\n\n'
+            printf 'OptiScaler changes that are not in official OptiScaler yet:\n\n'
             cat "$OUT/included.md"
-            printf '\n### Files\n\n'
-            printf -- '- `OptiScaler.dll`: just the DLL. Put it over the OptiScaler.dll of a current official nightly, or use it as-is with MFG Unlocker.\n'
-            printf -- '- `%s.7z`: full package, same layout as the official nightlies.\n' "$FILENAME"
-            printf -- '- `combined-source.patch`: the exact source changes on top of upstream `%s` (GPL-3.0 source).\n\n' "$UP_SHORT"
-            printf 'SHA-256 of OptiScaler.dll: `%s`\n\n' "$SHA256"
-            printf 'The version string inside the game shows commit `%s`. That hash only exists in this build, it is not an upstream commit.\n' "$HEAD_SHORT"
+            printf '\nMFG Unlocker:\n\n'
+            printf -- '- [MFG Unlocker `%s`](https://github.com/%s/releases/tag/%s): the official release DLL, unmodified, installed as `OptiScaler/plugins/MFGUnlocker.asi`.\n\n' "$MFG_TAG" "$MFG_REPO" "$MFG_TAG"
+
+            printf '### FakeMichau\n\n'
+            printf -- '- [dlssg-to-xefg `%s`](https://github.com/%s/commit/%s): %s\n' "${DLSSG_SHA:0:8}" "$DLSSG_REPO" "$DLSSG_SHA" "$DLSSG_SUBJECT"
+            printf -- '- Built from source. `dlssg_to_xefg_intel_is_better.dll` is in `OptiScaler/custom/NvngxXeFG/dlssg`, next to copies of the `libxe*.dll` files from the `OptiScaler` folder.\n\n'
+
+            printf '### Package\n\n'
+            printf -- '- `%s.7z`: the same layout as the official nightlies (`OptiScaler.dll`, `OptiScaler.ini` and so on, next to the `OptiScaler` folder), plus the files above.\n' "$FILENAME"
+            if [ "$HAS_PATCH" = "true" ]; then
+              printf -- '- `OptiScaler/combined-source.patch`: the exact OptiScaler source changes on top of upstream `%s` (GPL-3.0 source).\n\n' "$UP_SHORT"
+              printf 'The version string inside the game shows commit `%s`. That hash only exists in this build, it is not an upstream commit.\n' "$HEAD_SHORT"
+            fi
           } > "$NOTES"
 
           if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > /dev/null 2>&1; then
@@ -336,14 +499,12 @@ jobs:
           fi
 
           gh release create "$TAG" \
-            "$OUT/OptiScaler.dll" \
             "$OUT/$FILENAME.7z" \
-            "$OUT/combined-source.patch" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "OptiScaler $VERSION + dashdogy ($UP_DATE, $UP_SHORT)" \
+            --title "Opti Morning $UP_DATE ($UP_SHORT)" \
             --notes-file "$NOTES" \
-            --prerelease
+            --latest
 
           echo "Published release $TAG" >> "$GITHUB_STEP_SUMMARY"
 
