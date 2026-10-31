@@ -11,9 +11,12 @@
 #    3. Builds OptiScaler on a Windows machine.
 #    4. Builds FakeMichau's dlssg-to-xefg from source
 #       (-> dlssg_to_xefg_intel_is_better.dll).
-#    5. Downloads the latest official MFG Unlocker release from dashdogy
+#    5. Builds realdody's dlssg-to-xefg (the XMX multi-frame-generation fork)
+#       from source (-> a second dlssg_to_xefg_intel_is_better.dll) and takes
+#       its xefg_mfg_programs folder from realdody's latest release.
+#    6. Downloads the latest official MFG Unlocker release from dashdogy
 #       (-> MFGUnlocker.dll).
-#    6. Puts everything into ONE 7z and publishes it as a normal release on the
+#    7. Puts everything into ONE 7z and publishes it as a normal release on the
 #       Releases tab of THIS repository, titled
 #       "Opti Morning <date> (<upstream commit>)".
 #
@@ -28,12 +31,20 @@
 #           libxe*.dll                              copies (not moves) of the
 #                                                   libxe*.dll files that sit in
 #                                                   the OptiScaler folder
+#         custom/NvngxXeFGXMX/dlssg/                (folder name: DLSSG_MX_FOLDER)
+#           dlssg_to_xefg_intel_is_better.dll       built from realdody's repo
+#           libxe*.dll                              copies, same as above
+#           xefg_mfg_programs/                      from realdody's release
 #         combined-source.patch                     GPL source, see LICENCE
+#       Licenses/
+#         dlssg-to-xefg-realdody_LICENSE.txt        licence and notice files of
+#         dlssg-to-xefg-realdody_NOTICE.md          realdody's fork
 #
 #  THE RELEASE DESCRIPTION is split by origin, so you can see who contributed
 #  what: "OptiScaler nightly" (the base), "dashdogy" (his OptiScaler changes and
-#  the MFG Unlocker release), "FakeMichau" (the dlssg-to-xefg commit), then a
-#  "Package" section with the layout and the source patch.
+#  the MFG Unlocker release), "FakeMichau" (the dlssg-to-xefg commit),
+#  "realdody" (his dlssg-to-xefg commit and program set), then a "Package"
+#  section with the layout and the source patch.
 #
 #  WHY MFG UNLOCKER IS DOWNLOADED AND NOT BUILT
 #    Its BUILD.md says a source checkout alone cannot produce the DLL: it also
@@ -41,9 +52,23 @@
 #    the SM86 kernel caches) that are not in the repository. So the workflow
 #    takes the DLL from the official release, unmodified.
 #
+#  WHY xefg_mfg_programs IS DOWNLOADED AND NOT BUILT
+#    realdody's DLL reads that folder (programs.tsv + the .dxil files) from next
+#    to itself and refuses any set that is not the one pinned in its source. The
+#    set is derived from Intel's XeSS SDK and is not in the repository, so the
+#    workflow takes the folder, unmodified, from the newest realdody release
+#    that has a NvngxXeFGXMX*.zip file. Before packaging it checks the folder
+#    the same way the DLL does (pinned hash of programs.tsv, hash of every
+#    .dxil, program count), so a mismatch fails the run instead of shipping a
+#    folder the DLL would silently reject.
+#
 #  SAFETY RULES BUILT IN
 #    - Nothing changed since the last build (same upstream commit, PR head,
-#      MFG Unlocker release and dlssg-to-xefg commit)? It does nothing.
+#      MFG Unlocker release, both dlssg-to-xefg commits and the same realdody
+#      program-set release)? It does nothing.
+#    - The program set does not match what the realdody DLL expects (for
+#      example he changed the pinned hash but has not published the matching
+#      release yet)? The run FAILS and nothing is published.
 #    - dashdogy's changes no longer fit the newest upstream code? The run FAILS
 #      (red X, you get an email) and NO release is published. The previous
 #      release stays available.
@@ -56,11 +81,12 @@
 #  BUILD TOOLS (Visual Studio versions)
 #    The job runs on GitHub's "windows-latest" machine, which since June 2026 has
 #    Visual Studio 2026. Every project picks its own compiler version ("platform
-#    toolset") in its own project file, so the two builds do not have to match:
+#    toolset") in its own project file, so the builds do not have to match:
 #      - OptiScaler builds with whatever its project file asks for. It already
 #        built fine on windows-latest before this change.
-#      - dlssg-to-xefg's project file says "use the installed Visual Studio's own
-#        toolset" (it only needs C++20), so it adapts to VS 2022 or VS 2026.
+#      - dlssg-to-xefg's project files (FakeMichau's and realdody's) say "use
+#        the installed Visual Studio's own toolset" (they only need C++20), so
+#        they adapt to VS 2022 or VS 2026.
 #    The build step prints the MSBuild version, so the log shows what was used.
 #    If a build ever fails with "MSB8020 ... build tools for v143 cannot be
 #    found", a project wants VS 2022 and the machine only has VS 2026: change
@@ -82,11 +108,15 @@
 #  HEADS-UP: GitHub pauses scheduled workflows in a repository that has had no
 #  commits for 60 days. If that happens, GitHub emails you; click "Enable".
 #
-#  LICENCE: OptiScaler and dlssg-to-xefg are GPL-3.0. Whenever the build differs
-#  from upstream, the package includes OptiScaler/combined-source.patch (the
-#  exact OptiScaler changes on top of the named upstream commit), and the release
-#  names the exact dlssg-to-xefg commit. MFGUnlocker.dll is MIT, but embeds Intel
-#  XeSS program data that stays under Intel's terms (see its NOTICE.md).
+#  LICENCE: OptiScaler and both dlssg-to-xefg versions are GPL-3.0. Whenever the
+#  build differs from upstream, the package includes
+#  OptiScaler/combined-source.patch (the exact OptiScaler changes on top of the
+#  named upstream commit), and the release names the exact commit of each
+#  dlssg-to-xefg. MFGUnlocker.dll is MIT, but embeds Intel XeSS program data that
+#  stays under Intel's terms (see its NOTICE.md). The same goes for realdody's
+#  fork: it contains MIT code ported from MFG-Unlocker, and the xefg_mfg_programs
+#  folder is Intel XeSS program data under Intel's terms. Its LICENSE and
+#  NOTICE.md are copied into Licenses/ of the package.
 # =============================================================================
 
 name: Opti Morning (combined build)
@@ -136,6 +166,17 @@ env:
   DLSSG_REPO: FakeMichau/dlssg-to-xefg
   DLSSG_REF: master
 
+  # realdody's dlssg-to-xefg (XMX multi-frame-generation fork): built from this
+  # branch (or tag, or commit). Its xefg_mfg_programs folder is not in the
+  # source, so it is taken from the newest release of the same repository that
+  # has a NvngxXeFGXMX*.zip file.
+  DLSSG_MX_REPO: realdody/dlssg-to-xefg
+  DLSSG_MX_REF: master
+
+  # Folder name under OptiScaler/custom/ for realdody's build. OptiScaler lists
+  # this name in its menu. realdody's readme and release zip say NvngxXeFGXMX.
+  DLSSG_MX_FOLDER: NvngxXeFGXMX
+
   # How many combined releases to keep (older ones are deleted). 0 = keep all.
   KEEP_RELEASES: "20"
 
@@ -182,9 +223,23 @@ jobs:
           read -r DLSSG_SHA DLSSG_SUBJECT <<< "$(gh api "repos/$DLSSG_REPO/commits/$DLSSG_REF" --jq '.sha + " " + (.commit.message | split("\n")[0])')"
           read -r PR_STATE PR_MERGED PR_TITLE <<< "$(gh api "repos/$UPSTREAM_REPO/pulls/$PR_NUMBER" --jq '"\(.state) \(.merged) \(.title)"')"
 
+          # realdody's dlssg-to-xefg: the commit to build, and the newest published
+          # release that carries the xefg_mfg_programs folder (his CI also makes
+          # "build-N" releases with only a DLL in them; those are skipped).
+          read -r DLSSG_MX_SHA DLSSG_MX_SUBJECT <<< "$(gh api "repos/$DLSSG_MX_REPO/commits/$DLSSG_MX_REF" --jq '.sha + " " + (.commit.message | split("\n")[0])')"
+          read -r MXP_TAG MXP_ASSET_ID <<< "$(gh api "repos/$DLSSG_MX_REPO/releases?per_page=30" --jq '
+            [.[] | select(.draft | not)
+                 | {tag: .tag_name, asset: (first(.assets[] | select(.name | test("^NvngxXeFGXMX.*[.]zip$"))) // empty)}]
+            | .[0] // empty
+            | "\(.tag) \(.asset.id)"')"
+          [ -n "$DLSSG_MX_SHA" ] || { echo "::error::Could not read '$DLSSG_MX_REF' of $DLSSG_MX_REPO."; exit 1; }
+          [ -n "$MXP_TAG" ] || { echo "::error::No published release of $DLSSG_MX_REPO has a NvngxXeFGXMX*.zip file, so the xefg_mfg_programs folder cannot be fetched."; exit 1; }
+
           echo "Upstream:      $UP_SHORT  $UP_SUBJECT  ($UP_DATE)"
           echo "MFG Unlocker:  $MFG_TAG"
           echo "dlssg-to-xefg: ${DLSSG_SHA:0:8}  $DLSSG_SUBJECT"
+          echo "dlssg-to-xefg (realdody): ${DLSSG_MX_SHA:0:8}  $DLSSG_MX_SUBJECT"
+          echo "xefg_mfg_programs from:   $DLSSG_MX_REPO release $MXP_TAG"
 
           PR_HEAD="merged"
           if [ "$PR_MERGED" = "true" ]; then
@@ -204,11 +259,11 @@ jobs:
           done <<< "$EXTRA_COMMITS"
 
           # ---- 2. Same inputs as an existing release? Then nothing to do -----
-          FP=$(printf '%s\n' "$UP_SHA" "$PR_HEAD" $EXTRAS "$MFG_TAG" "$DLSSG_SHA" | sha1sum | cut -c1-12)
+          FP=$(printf '%s\n' "$UP_SHA" "$PR_HEAD" $EXTRAS "$MFG_TAG" "$DLSSG_SHA" "$DLSSG_MX_SHA" "$MXP_TAG" "$MXP_ASSET_ID" | sha1sum | cut -c1-12)
           TAG="build-$FP"
           if [ "$FORCE" != "true" ] && gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > /dev/null 2>&1; then
             echo "::notice::Nothing new since the last build ($TAG already exists)."
-            echo "### Nothing to do: \`$TAG\` already contains upstream \`$UP_SHORT\`, the same dashdogy changes, MFG Unlocker \`$MFG_TAG\` and dlssg-to-xefg \`${DLSSG_SHA:0:8}\`." >> "$GITHUB_STEP_SUMMARY"
+            echo "### Nothing to do: \`$TAG\` already contains upstream \`$UP_SHORT\`, the same dashdogy changes, MFG Unlocker \`$MFG_TAG\`, dlssg-to-xefg \`${DLSSG_SHA:0:8}\` and realdody's dlssg-to-xefg \`${DLSSG_MX_SHA:0:8}\` (programs from \`$MXP_TAG\`)." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -254,7 +309,7 @@ jobs:
           if [ -s "$OUT/combined-source.patch" ]; then
             HAS_PATCH=true
           else
-            echo "::notice::Upstream already contains every OptiScaler change listed here. Building anyway, for MFG Unlocker and dlssg-to-xefg."
+            echo "::notice::Upstream already contains every OptiScaler change listed here. Building anyway, for MFG Unlocker and the two dlssg-to-xefg builds."
           fi
 
           # ---- 5. Version and file name --------------------------------------
@@ -265,12 +320,12 @@ jobs:
 
           # ---- 6. Hand everything to the later steps -------------------------
           # (a small file that later steps load with "source")
-          for v in TAG VERSION FILENAME UP_SHA UP_SHORT UP_DATE UP_SUBJECT HEAD_SHORT HAS_PATCH MFG_TAG DLSSG_SHA DLSSG_SUBJECT; do
+          for v in TAG VERSION FILENAME UP_SHA UP_SHORT UP_DATE UP_SUBJECT HEAD_SHORT HAS_PATCH MFG_TAG DLSSG_SHA DLSSG_SUBJECT DLSSG_MX_SHA DLSSG_MX_SUBJECT MXP_TAG MXP_ASSET_ID; do
             printf '%s=%q\n' "$v" "${!v}"
           done > "$OUT/vars.sh"
           echo "build=true" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch add-ons (dlssg-to-xefg source, MFG Unlocker release)
+      - name: Fetch add-ons (both dlssg-to-xefg sources, program set, MFG Unlocker release)
         if: steps.plan.outputs.build == 'true'
         run: |
           set -euo pipefail
@@ -281,6 +336,53 @@ jobs:
           git init -q dlssg
           git -C dlssg fetch -q --depth 1 "https://github.com/$DLSSG_REPO.git" "$DLSSG_SHA"
           git -C dlssg checkout -q FETCH_HEAD
+
+          # dlssg-to-xefg, realdody's fork: the exact commit chosen in the plan step
+          git init -q dlssg-mx
+          git -C dlssg-mx fetch -q --depth 1 "https://github.com/$DLSSG_MX_REPO.git" "$DLSSG_MX_SHA"
+          git -C dlssg-mx checkout -q FETCH_HEAD
+
+          # realdody's xefg_mfg_programs folder: Intel XeSS program data that is not
+          # in the source repository. It comes from the release ZIP chosen in the
+          # plan step; the folder is found by name, wherever the ZIP keeps it.
+          mkdir -p mxp/unpacked
+          gh release download "$MXP_TAG" --repo "$DLSSG_MX_REPO" --pattern 'NvngxXeFGXMX*.zip' --dir mxp
+          for z in mxp/*.zip; do
+            7z x -y -omxp/unpacked "$z" > /dev/null
+          done
+          mapfile -t FOUND < <(find mxp/unpacked -type d -name xefg_mfg_programs)
+          [ "${#FOUND[@]}" -eq 1 ] || { echo "::error::Expected exactly one xefg_mfg_programs folder in release $MXP_TAG of $DLSSG_MX_REPO, found ${#FOUND[@]}."; find mxp -maxdepth 3; exit 1; }
+          mv "${FOUND[0]}" mxp/xefg_mfg_programs
+
+          # The DLL refuses any program set that is not the one pinned in its own
+          # source, and then quietly runs without it. Check the same things here
+          # (pinned hash of programs.tsv, hash of every .dxil, program count), so
+          # a mismatch fails this run instead of shipping a folder that gets rejected.
+          PROG=mxp/xefg_mfg_programs
+          SRC=dlssg-mx/src/MfgPort/RuntimePayload.cpp
+          [ -f "$PROG/programs.tsv" ] || { echo "::error::programs.tsv is missing from the xefg_mfg_programs folder of release $MXP_TAG."; exit 1; }
+          PIN=$(grep -oE 'ManifestSha256\[\] = "[0-9a-f]{64}"' "$SRC" | grep -oE '[0-9a-f]{64}' || true)
+          WANT=$(grep -oE 'ProgramCount = [0-9]+' "$SRC" | grep -oE '[0-9]+' || true)
+          GOT=$(sha256sum "$PROG/programs.tsv" | cut -d' ' -f1)
+          if [ -z "$PIN" ]; then
+            echo "::warning::Could not read the pinned programs.tsv hash from $SRC (did its layout change?). Skipping that one comparison."
+          elif [ "$GOT" != "$PIN" ]; then
+            echo "::error::programs.tsv of release $MXP_TAG ($GOT) is not the set that dlssg-to-xefg commit ${DLSSG_MX_SHA:0:8} expects ($PIN). Maybe realdody has not published the matching release yet."
+            exit 1
+          fi
+          ROWS=0
+          while read -r key hash; do
+            [ -z "$key" ] && continue
+            [[ "$key" =~ ^[0-9]{4,24}$ && "$hash" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Malformed row in programs.tsv: $key $hash"; exit 1; }
+            [ -f "$PROG/$key.dxil" ] || { echo "::error::programs.tsv lists $key.dxil but that file is missing."; exit 1; }
+            [ "$(sha256sum "$PROG/$key.dxil" | cut -d' ' -f1)" = "$hash" ] || { echo "::error::$key.dxil does not match its hash in programs.tsv."; exit 1; }
+            ROWS=$((ROWS + 1))
+          done < <(tr -d '\r' < "$PROG/programs.tsv")
+          if [ -n "$WANT" ] && [ "$ROWS" -ne "$WANT" ]; then
+            echo "::error::programs.tsv lists $ROWS programs, the DLL source expects $WANT."
+            exit 1
+          fi
+          echo "xefg_mfg_programs: $ROWS programs checked (release $MXP_TAG)."
 
           # MFG Unlocker: the release normally holds a ZIP with MFGUnlocker.dll
           # inside; a bare DLL is accepted too.
@@ -300,7 +402,7 @@ jobs:
         if: steps.plan.outputs.build == 'true'
         uses: microsoft/setup-msbuild@v3
 
-      - name: Build OptiScaler and dlssg-to-xefg (Release x64)
+      - name: Build OptiScaler and both dlssg-to-xefg versions (Release x64)
         if: steps.plan.outputs.build == 'true'
         shell: pwsh
         run: |
@@ -308,6 +410,8 @@ jobs:
           msbuild src/OptiScaler.sln /m /p:Configuration=Release /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           msbuild dlssg/dlssg-to-xefg.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild dlssg-mx/dlssg-to-xefg.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
 
       - name: Package
         if: steps.plan.outputs.build == 'true'
@@ -320,29 +424,46 @@ jobs:
           STAGE="$GITHUB_WORKSPACE/stage"
           BUILT="src/x64/Release/a"
           DLSSG_DLL="dlssg/bin/Release/dlssg_to_xefg_intel_is_better.dll"
+          DLSSG_MX_DLL="dlssg-mx/bin/Release/dlssg_to_xefg_intel_is_better.dll"
+          MX_PROGRAMS="mxp/xefg_mfg_programs"
           FETCHER_BAT="src/Streamlined_fetcher_windows.bat"
           PLUGINS="$STAGE/OptiScaler/plugins"
           DLSSG_DIR="$STAGE/OptiScaler/custom/NvngxXeFG/dlssg"
+          MX_DIR="$STAGE/OptiScaler/custom/$DLSSG_MX_FOLDER/dlssg"
 
           # Everything we need must exist, or we stop here.
-          for p in "$BUILT/OptiScaler.dll" "$BUILT/OptiScaler" "$DLSSG_DLL" mfg/MFGUnlocker.dll "$FETCHER_BAT"; do
+          for p in "$BUILT/OptiScaler.dll" "$BUILT/OptiScaler" "$DLSSG_DLL" "$DLSSG_MX_DLL" "$MX_PROGRAMS/programs.tsv" \
+                   dlssg-mx/LICENSE dlssg-mx/NOTICE.md mfg/MFGUnlocker.dll "$FETCHER_BAT"; do
             [ -e "$p" ] || { echo "::error::Missing build output: $p"; ls -la "$(dirname "$p")" || true; exit 1; }
           done
 
           # Start from the normal nightly layout, then add our parts.
-          mkdir -p "$STAGE" "$PLUGINS" "$DLSSG_DIR"
+          mkdir -p "$STAGE" "$PLUGINS" "$DLSSG_DIR" "$MX_DIR" "$STAGE/Licenses"
           cp -a "$BUILT/." "$STAGE/"
           cp mfg/MFGUnlocker.dll "$PLUGINS/MFGUnlocker.asi"
           cp "$DLSSG_DLL" "$DLSSG_DIR/"
+          cp "$DLSSG_MX_DLL" "$MX_DIR/"
+          cp -r "$MX_PROGRAMS" "$MX_DIR/"
+
+          # Licence and notice files of realdody's fork (GPL-3.0, plus the MIT text
+          # for the code ported from MFG-Unlocker). They go next to the other
+          # licences, not into the dlssg folder, which keeps its exact layout.
+          cp dlssg-mx/LICENSE   "$STAGE/Licenses/dlssg-to-xefg-realdody_LICENSE.txt"
+          cp dlssg-mx/NOTICE.md "$STAGE/Licenses/dlssg-to-xefg-realdody_NOTICE.md"
 
           # The official nightlies also ship Streamlined_fetcher_windows.bat inside
           # the OptiScaler folder (their workflow copies it from the repo root).
           cp "$FETCHER_BAT" "$STAGE/OptiScaler/"
 
-          # dlssg-to-xefg also needs a COPY of every libxe*.dll next to it.
+          # Both dlssg-to-xefg folders also need a COPY of every libxe*.dll next to
+          # the DLL. Today that is libxell, libxess, libxess_dx11 and libxess_fg.
+          # realdody's DLL needs libxess_fg.dll there (unless the game loads its
+          # own), so it is the one file that is checked by name.
           LIBS=("$STAGE"/OptiScaler/libxe*.dll)
           [ "${#LIBS[@]}" -gt 0 ] || { echo "::error::No libxe*.dll in the OptiScaler folder of the build output."; ls -la "$STAGE/OptiScaler"; exit 1; }
+          [ -f "$STAGE/OptiScaler/libxess_fg.dll" ] || { echo "::error::libxess_fg.dll is not in the OptiScaler folder of the build output, realdody's dlssg-to-xefg needs it next to its DLL."; ls -la "$STAGE/OptiScaler"; exit 1; }
           cp "${LIBS[@]}" "$DLSSG_DIR/"
+          cp "${LIBS[@]}" "$MX_DIR/"
 
           # GPL source patch, only when the build differs from upstream.
           if [ "$HAS_PATCH" = "true" ]; then
@@ -351,6 +472,9 @@ jobs:
 
           echo "Added to the package:"
           find "$PLUGINS" "$DLSSG_DIR" "$STAGE/OptiScaler/Streamlined_fetcher_windows.bat" -type f | sed "s|^$STAGE/||"
+          find "$MX_DIR" -maxdepth 1 -type f | sed "s|^$STAGE/||"
+          echo "${MX_DIR#$STAGE/}/xefg_mfg_programs/  ($(find "$MX_DIR/xefg_mfg_programs" -type f | wc -l) files)"
+          find "$STAGE/Licenses" -name 'dlssg-to-xefg-realdody_*' -type f | sed "s|^$STAGE/||"
 
           (cd "$STAGE" && 7z a -r "$OUT/$FILENAME.7z" '*' > /dev/null)
           ls -la "$OUT/$FILENAME.7z"
@@ -368,7 +492,7 @@ jobs:
 
             printf '### OptiScaler nightly\n\n'
             printf -- '- Official OptiScaler `%s`, upstream commit [`%s`](https://github.com/%s/commit/%s) (%s): "%s"\n' "$VERSION" "$UP_SHORT" "$UPSTREAM_REPO" "$UP_SHA" "$UP_DATE" "$UP_SUBJECT"
-            printf -- '- This is the same code the official nightlies are built from. The two sections below are added on top of it.\n\n'
+            printf -- '- This is the same code the official nightlies are built from. The sections below are added on top of it.\n\n'
 
             printf '### dashdogy\n\n'
             printf 'OptiScaler changes that are not in official OptiScaler yet:\n\n'
@@ -379,6 +503,13 @@ jobs:
             printf '### FakeMichau\n\n'
             printf -- '- [dlssg-to-xefg `%s`](https://github.com/%s/commit/%s): %s\n' "${DLSSG_SHA:0:8}" "$DLSSG_REPO" "$DLSSG_SHA" "$DLSSG_SUBJECT"
             printf -- '- Built from source. `dlssg_to_xefg_intel_is_better.dll` is in `OptiScaler/custom/NvngxXeFG/dlssg`, next to copies of the `libxe*.dll` files from the `OptiScaler` folder.\n\n'
+
+            printf '### realdody\n\n'
+            printf -- '- [dlssg-to-xefg `%s`](https://github.com/%s/commit/%s): %s\n' "${DLSSG_MX_SHA:0:8}" "$DLSSG_MX_REPO" "$DLSSG_MX_SHA" "$DLSSG_MX_SUBJECT"
+            printf -- '- Built from source (the XMX multi-frame-generation version of dlssg-to-xefg). `dlssg_to_xefg_intel_is_better.dll` is in `OptiScaler/custom/%s/dlssg`, next to copies of the `libxe*.dll` files from the `OptiScaler` folder.\n' "$DLSSG_MX_FOLDER"
+            printf -- '- `xefg_mfg_programs` in that folder is not built here. It is taken unmodified from [release `%s`](https://github.com/%s/releases/tag/%s) of the same repository, and was checked against the hash pinned in the DLL source. It is derived from Intel XeSS program data and stays under the Intel licence terms.\n' "$MXP_TAG" "$DLSSG_MX_REPO" "$MXP_TAG"
+            printf -- '- In the OptiScaler menu, pick `%s` as the FG replacement. The [readme](https://github.com/%s#installation) has the full steps.\n' "$DLSSG_MX_FOLDER" "$DLSSG_MX_REPO"
+            printf -- '- `Licenses/dlssg-to-xefg-realdody_LICENSE.txt` and `Licenses/dlssg-to-xefg-realdody_NOTICE.md` are the licence and notice files of that repository.\n\n'
 
             printf '### Package\n\n'
             printf -- '- `%s.7z`: the same layout as the official nightlies (`OptiScaler.dll`, `OptiScaler.ini` and so on, next to the `OptiScaler` folder), plus the files above.\n' "$FILENAME"
