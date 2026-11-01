@@ -42,9 +42,15 @@
 #
 #  THE RELEASE DESCRIPTION is split by origin, so you can see who contributed
 #  what: "OptiScaler nightly" (the base), "dashdogy" (his OptiScaler changes and
-#  the MFG Unlocker release), "FakeMichau" (the dlssg-to-xefg commit),
-#  "realdody" (his dlssg-to-xefg commit and program set), then a "Package"
-#  section with the layout and the source patch.
+#  the MFG Unlocker release), "FakeMichau" and "realdody" (their dlssg-to-xefg
+#  commits; realdody's with a note on his program set), then a short "Install"
+#  section. The OptiScaler, FakeMichau and realdody sections list the commits
+#  made since the PREVIOUS release of this repository (newest first, at most
+#  NOTES_MAX_COMMITS each, plus a compare link). To know where the previous
+#  release stopped, every description ends with a hidden HTML comment holding
+#  the three commit IDs; for releases made before that existed, the IDs are read
+#  from the commit links in their description. No earlier release, or the
+#  lookup fails? The section just names this build's commit.
 #
 #  WHY MFG UNLOCKER IS DOWNLOADED AND NOT BUILT
 #    Its BUILD.md says a source checkout alone cannot produce the DLL: it also
@@ -187,6 +193,10 @@ env:
   # How many combined releases to keep (older ones are deleted). 0 = keep all.
   KEEP_RELEASES: "20"
 
+  # Most commits listed per section of the release notes. Anything beyond that
+  # becomes one "and N older commits" line (the compare link has them all).
+  NOTES_MAX_COMMITS: "30"
+
 jobs:
   build:
     runs-on: windows-latest
@@ -274,6 +284,30 @@ jobs:
             exit 0
           fi
 
+          # ---- 2b. Where the previous release stopped ------------------------
+          # (for the "changes since the last release" lists in the notes)
+          # Every release body ends with a hidden comment holding the commits it
+          # was built from. Releases made before that existed are read from the
+          # commit links in their description. A forced rebuild skips its own
+          # tag, so it compares against the release before it.
+          PREV_TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,publishedAt \
+            --jq 'sort_by(.publishedAt) | reverse | .[].tagName | select(startswith("build-"))' \
+            | tr -d '\r' | grep -vx "$TAG" | head -n 1 || true)
+          PREV_BODY=""
+          if [ -n "$PREV_TAG" ]; then
+            PREV_BODY=$(gh release view "$PREV_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' 2> /dev/null | tr -d '\r' || true)
+          fi
+          prev_sha() {   # $1 = key in the hidden comment, $2 = owner/repo for old-style descriptions
+            local s
+            s=$(printf '%s\n' "$PREV_BODY" | grep -oE "$1=[0-9a-f]{40}" | head -n 1 | cut -d= -f2 || true)
+            [ -n "$s" ] || s=$(printf '%s\n' "$PREV_BODY" | grep -oE "github[.]com/$2/commit/[0-9a-f]{40}" | head -n 1 | grep -oE '[0-9a-f]{40}$' || true)
+            printf '%s' "$s"
+          }
+          PREV_UP_SHA=$(prev_sha upstream "$UPSTREAM_REPO")
+          PREV_DLSSG_SHA=$(prev_sha fakemichau "$DLSSG_REPO")
+          PREV_DLSSG_MX_SHA=$(prev_sha realdody "$DLSSG_MX_REPO")
+          echo "Previous release: ${PREV_TAG:-none}  (upstream ${PREV_UP_SHA:0:8}, FakeMichau ${PREV_DLSSG_SHA:0:8}, realdody ${PREV_DLSSG_MX_SHA:0:8})"
+
           # ---- 3. Merge dashdogy's OptiScaler changes onto upstream ----------
           git config user.name  "combined-build"
           git config user.email "combined-build@users.noreply.github.com"
@@ -327,7 +361,7 @@ jobs:
 
           # ---- 6. Hand everything to the later steps -------------------------
           # (a small file that later steps load with "source")
-          for v in TAG VERSION FILENAME UP_SHA UP_SHORT UP_DATE UP_SUBJECT HEAD_SHORT HAS_PATCH MFG_TAG DLSSG_SHA DLSSG_SUBJECT DLSSG_MX_SHA DLSSG_MX_SUBJECT MXP_TAG MXP_ASSET_ID; do
+          for v in TAG VERSION FILENAME UP_SHA UP_SHORT UP_DATE UP_SUBJECT HEAD_SHORT HAS_PATCH MFG_TAG DLSSG_SHA DLSSG_SUBJECT DLSSG_MX_SHA DLSSG_MX_SUBJECT MXP_TAG MXP_ASSET_ID PREV_UP_SHA PREV_DLSSG_SHA PREV_DLSSG_MX_SHA; do
             printf '%s=%q\n' "$v" "${!v}"
           done > "$OUT/vars.sh"
           echo "build=true" >> "$GITHUB_OUTPUT"
@@ -494,37 +528,73 @@ jobs:
           OUT="$GITHUB_WORKSPACE/out"
           NOTES="$OUT/notes.md"
 
+          # ---- Helpers for the notes -----------------------------------------
+          # Makes a commit subject safe to paste into the notes: no stray markdown,
+          # no @mentions (they would ping people), and "#123" links to the
+          # repository the commit came from instead of to this one.
+          md_clean() {
+            sed -E 's/([]\\`*_<>[|])/\\\1/g; s,(^|[^[:alnum:]])#([0-9]+),\1[#\2](https://github.com/'"$1"'/pull/\2),g; s/@/@\&#8203;/g'
+          }
+
+          # Prints the "what changed" part of one section.
+          #   $1 owner/repo   $2 commit the LAST release was built from (may be empty)
+          #   $3 commit THIS build uses   $4 subject of $3 (used when nothing can be compared)
+          changes() {
+            local repo="$1" base="$2" head="$3" subject="$4" lines="" n=0 sha subj
+            if [ -n "$base" ] && [ "$base" = "$head" ]; then
+              printf 'No new commits since the last release (still [`%s`](https://github.com/%s/commit/%s)).\n' "${head:0:8}" "$repo" "$head"
+              return
+            fi
+            if [ -n "$base" ]; then
+              # The API lists oldest first; tac flips that. If the lookup fails
+              # (say the old commit was force-pushed away) there is just no list.
+              lines=$(gh api --paginate "repos/$repo/compare/$base...$head?per_page=100" \
+                --jq '.commits[] | .sha + "\t" + (.commit.message | split("\n")[0])' 2> /dev/null \
+                | tr -d '\r' | tac || true)
+            fi
+            if [ -z "$lines" ]; then
+              printf -- '- [`%s`](https://github.com/%s/commit/%s) %s\n' "${head:0:8}" "$repo" "$head" "$(printf '%s' "$subject" | md_clean "$repo")"
+              return
+            fi
+            printf 'Changes since the last release ([compare](https://github.com/%s/compare/%s...%s)):\n\n' "$repo" "$base" "$head"
+            while IFS=$'\t' read -r sha subj; do
+              n=$((n + 1))
+              [ "$n" -le "$NOTES_MAX_COMMITS" ] || continue
+              printf -- '- [`%s`](https://github.com/%s/commit/%s) %s\n' "${sha:0:8}" "$repo" "$sha" "$(printf '%s' "$subj" | md_clean "$repo")"
+            done <<< "$lines"
+            if [ "$n" -gt "$NOTES_MAX_COMMITS" ]; then
+              printf -- '- ... and %s older commits (see the compare link above).\n' "$((n - NOTES_MAX_COMMITS))"
+            fi
+          }
+
           {
             printf '**Unofficial combined build.** Do not report problems with this build to the OptiScaler team or to the authors of the parts added below.\n\n'
 
             printf '### OptiScaler nightly\n\n'
-            printf -- '- Official OptiScaler `%s`, upstream commit [`%s`](https://github.com/%s/commit/%s) (%s): "%s"\n' "$VERSION" "$UP_SHORT" "$UPSTREAM_REPO" "$UP_SHA" "$UP_DATE" "$UP_SUBJECT"
-            printf -- '- This is the same code the official nightlies are built from. The sections below are added on top of it.\n\n'
+            printf 'Official OptiScaler `%s`, the same code the official nightlies are built from.\n\n' "$VERSION"
+            changes "$UPSTREAM_REPO" "$PREV_UP_SHA" "$UP_SHA" "$UP_SUBJECT"
 
-            printf '### dashdogy\n\n'
+            printf '\n### dashdogy\n\n'
             printf 'OptiScaler changes that are not in official OptiScaler yet:\n\n'
             cat "$OUT/included.md"
             printf '\nMFG Unlocker:\n\n'
-            printf -- '- [MFG Unlocker `%s`](https://github.com/%s/releases/tag/%s): the official release DLL, unmodified, installed as `OptiScaler/plugins/MFGUnlocker.asi`.\n\n' "$MFG_TAG" "$MFG_REPO" "$MFG_TAG"
+            printf -- '- [MFG Unlocker `%s`](https://github.com/%s/releases/tag/%s): the official release DLL, unmodified, installed as `OptiScaler/plugins/MFGUnlocker.asi`.\n' "$MFG_TAG" "$MFG_REPO" "$MFG_TAG"
 
-            printf '### FakeMichau\n\n'
-            printf -- '- [dlssg-to-xefg `%s`](https://github.com/%s/commit/%s): %s\n' "${DLSSG_SHA:0:8}" "$DLSSG_REPO" "$DLSSG_SHA" "$DLSSG_SUBJECT"
-            printf -- '- Built from source. `dlssg_to_xefg_intel_is_better.dll` is in `OptiScaler/custom/NvngxXeFG/dlssg`, next to copies of the `libxe*.dll` files from the `OptiScaler` folder.\n\n'
+            printf '\n### FakeMichau\n\n'
+            printf '[dlssg-to-xefg](https://github.com/%s), built from source into `OptiScaler/custom/NvngxXeFG/dlssg`.\n\n' "$DLSSG_REPO"
+            changes "$DLSSG_REPO" "$PREV_DLSSG_SHA" "$DLSSG_SHA" "$DLSSG_SUBJECT"
 
-            printf '### realdody\n\n'
-            printf -- '- [dlssg-to-xefg `%s`](https://github.com/%s/commit/%s): %s\n' "${DLSSG_MX_SHA:0:8}" "$DLSSG_MX_REPO" "$DLSSG_MX_SHA" "$DLSSG_MX_SUBJECT"
-            printf -- '- Built from source (the XMX multi-frame-generation version of dlssg-to-xefg). `dlssg_to_xefg_intel_is_better.dll` is in `OptiScaler/custom/%s/dlssg`, next to copies of the `libxe*.dll` files from the `OptiScaler` folder.\n' "$DLSSG_MX_FOLDER"
-            printf -- '- `xefg_mfg_programs` in that folder is not built here. It is taken unmodified from [release `%s`](https://github.com/%s/releases/tag/%s) of the same repository, and was checked against the hash pinned in the DLL source. It is derived from Intel XeSS program data and stays under the Intel licence terms.\n' "$MXP_TAG" "$DLSSG_MX_REPO" "$MXP_TAG"
-            printf -- '- In the OptiScaler menu, pick `%s` as the FG replacement. The [readme](https://github.com/%s#installation) has the full steps.\n' "$DLSSG_MX_FOLDER" "$DLSSG_MX_REPO"
-            printf -- '- `Licenses/dlssg-to-xefg-realdody_LICENSE.txt` and `Licenses/dlssg-to-xefg-realdody_NOTICE.md` are the licence and notice files of that repository.\n\n'
+            printf '\n### realdody\n\n'
+            printf '[dlssg-to-xefg](https://github.com/%s) (XMX multi-frame-generation fork), built from source into `OptiScaler/custom/%s/dlssg`.\n\n' "$DLSSG_MX_REPO" "$DLSSG_MX_FOLDER"
+            changes "$DLSSG_MX_REPO" "$PREV_DLSSG_MX_SHA" "$DLSSG_MX_SHA" "$DLSSG_MX_SUBJECT"
+            printf '\n`xefg_mfg_programs` is not built here: it is taken unmodified from [release `%s`](https://github.com/%s/releases/tag/%s) and was checked against the hash pinned in the DLL source. It is derived from Intel XeSS program data and stays under the Intel licence terms.\n' "$MXP_TAG" "$DLSSG_MX_REPO" "$MXP_TAG"
 
-            printf '### Package\n\n'
-            printf -- '- `%s.7z`: the same layout as the official nightlies (`OptiScaler.dll`, `OptiScaler.ini` and so on, next to the `OptiScaler` folder), plus the files above.\n' "$FILENAME"
-            printf -- '- `OptiScaler/Streamlined_fetcher_windows.bat`: the fetcher script the official nightlies ship too, copied from the OptiScaler source.\n'
-            if [ "$HAS_PATCH" = "true" ]; then
-              printf -- '- `OptiScaler/combined-source.patch`: the exact OptiScaler source changes on top of upstream `%s` (GPL-3.0 source).\n\n' "$UP_SHORT"
-              printf 'The version string inside the game shows commit `%s`. That hash only exists in this build, it is not an upstream commit.\n' "$HEAD_SHORT"
-            fi
+            printf '\n### Install\n\n'
+            printf 'Install as normal OptiScaler.\n\n'
+            printf '**Note:** to use dashdogy'"'"'s version, enable the plugin (MFG Unlocker). To use FakeMichau'"'"'s or realdody'"'"'s, disable the plugin.\n'
+
+            # Hidden from the page. The next build reads it to see where this one stopped.
+            printf '\n<!-- opti-morning: upstream=%s fakemichau=%s realdody=%s -->\n' "$UP_SHA" "$DLSSG_SHA" "$DLSSG_MX_SHA"
           } > "$NOTES"
           cat "$NOTES" >> "$GITHUB_STEP_SUMMARY"
 
