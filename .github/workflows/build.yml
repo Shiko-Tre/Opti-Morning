@@ -78,6 +78,13 @@
 #      stops adding it. The build still goes on, because MFG Unlocker and
 #      dlssg-to-xefg are still part of the package.
 #
+#  ORDER OF THE RELEASES LIST
+#    GitHub sorts the Releases page by the date of the commit each release's tag
+#    points to, not by publish time. So every release gets its own tag commit,
+#    dated at build time (see "Sorting fix" in the publish step), and the
+#    newest build always shows at the top. These small commits are only
+#    reachable through the release tags; they do not appear on any branch.
+#
 #  BUILD TOOLS (Visual Studio versions)
 #    The job runs on GitHub's "windows-latest" machine, which since June 2026 has
 #    Visual Studio 2026. Every project picks its own compiler version ("platform
@@ -523,10 +530,40 @@ jobs:
 
           # A forced rebuild replaces the release with the same tag.
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2> /dev/null || true
+          # Also remove a leftover tag from an earlier run that died before the
+          # release was created (otherwise creating the tag below would fail).
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" > /dev/null 2>&1 || true
 
+          # ---- Sorting fix ---------------------------------------------------
+          # GitHub sorts the Releases page by the DATE OF THE COMMIT THE TAG POINTS
+          # TO, not by when the release was published. Pointing every release at
+          # $GITHUB_SHA (this repository's newest commit, which rarely changes)
+          # gave all releases the SAME date, and GitHub then ordered them by their
+          # random "build-<hash>" tag names, so a new release could land anywhere.
+          # Fix: for each release, make a new commit dated right now (same files as
+          # $GITHUB_SHA, nothing on any branch, nothing in your history) and tag
+          # that. A later build then always has a later date and sorts above the
+          # earlier ones.
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          BASE_TREE=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq '.tree.sha')
+          STAMP_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/commits" \
+            -f "message=Opti Morning $UP_DATE ($UP_SHORT)" \
+            -f "tree=$BASE_TREE" \
+            -f "parents[]=$GITHUB_SHA" \
+            -f "author[name]=combined-build" \
+            -f "author[email]=combined-build@users.noreply.github.com" \
+            -f "author[date]=$NOW" \
+            -f "committer[name]=combined-build" \
+            -f "committer[email]=combined-build@users.noreply.github.com" \
+            -f "committer[date]=$NOW" \
+            --jq '.sha')
+          [ -n "$STAMP_SHA" ] || { echo "::error::Could not create the dated commit for the release tag."; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$STAMP_SHA" > /dev/null
+          echo "Tag $TAG -> $STAMP_SHA (dated $NOW)"
+
+          # The tag already exists now, so no --target is needed.
           gh release create "$TAG" "$OUT/$FILENAME.7z" \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
             --title "Opti Morning $UP_DATE ($UP_SHORT)" \
             --notes-file "$NOTES" \
             --latest
@@ -535,7 +572,7 @@ jobs:
           # (tags starting with "build-").
           if [ "$KEEP_RELEASES" -gt 0 ]; then
             gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
-              --jq 'sort_by(.createdAt) | reverse | .[].tagName | select(startswith("build-"))' \
+              --jq 'sort_by(.publishedAt) | reverse | .[].tagName | select(startswith("build-"))' \
               | tr -d '\r' | tail -n +"$((KEEP_RELEASES + 1))" \
               | while read -r old; do
                   echo "Removing old release $old"
