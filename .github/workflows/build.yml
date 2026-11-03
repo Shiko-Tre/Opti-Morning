@@ -32,7 +32,7 @@
 #           libxe*.dll                              copies (not moves) of the
 #                                                   libxe*.dll files that sit in
 #                                                   the OptiScaler folder
-#         custom/NvngxXeFGXMX/dlssg/                (folder name: DLSSG_MX_FOLDER)
+#         custom/XeMFG XMX/dlssg/                   (folder name: DLSSG_MX_FOLDER)
 #           dlssg_to_xefg_intel_is_better.dll       built from realdody's repo
 #           libxe*.dll                              copies, same as above
 #           xefg_mfg_programs/                      made by realdody's build
@@ -199,15 +199,20 @@ env:
   DLSSG_REF: master
 
   # realdody's dlssg-to-xefg (XMX multi-frame-generation fork): built from this
-  # branch (or tag, or commit). The build itself downloads the pinned
+  # branch (or tag, or commit). The repository was renamed from
+  # realdody/dlssg-to-xefg to realdody/dlssg-to-xefg-xmx (the old name still
+  # redirects, but use the real name). The build itself downloads the pinned
   # MFG-Unlocker release and extracts the xefg_mfg_programs folder (program set
   # + tensor-core fatbin) into bin\Release, so nothing else has to be fetched.
-  DLSSG_MX_REPO: realdody/dlssg-to-xefg
+  DLSSG_MX_REPO: realdody/dlssg-to-xefg-xmx
   DLSSG_MX_REF: master
 
   # Folder name under OptiScaler/custom/ for realdody's build. OptiScaler lists
-  # this name in its menu. realdody's readme and release zip say NvngxXeFGXMX.
-  DLSSG_MX_FOLDER: NvngxXeFGXMX
+  # this name in its menu. realdody's readme now says "XeMFG XMX" (it used to be
+  # NvngxXeFGXMX). The space is fine: every path in this file is quoted. Note
+  # that OptiScaler keeps the plugin's settings under [Plugin.<name>] in
+  # OptiScaler.ini, so changing the name makes users start with default settings.
+  DLSSG_MX_FOLDER: XeMFG XMX
 
   # How many combined releases to keep (older ones are deleted). 0 = keep all.
   KEEP_RELEASES: "20"
