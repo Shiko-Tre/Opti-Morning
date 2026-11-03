@@ -85,11 +85,18 @@
 #      dlssg-to-xefg are still part of the package.
 #
 #  ORDER OF THE RELEASES LIST
-#    GitHub sorts the Releases page by the date of the commit each release's tag
-#    points to, not by publish time. So every release gets its own tag commit,
-#    dated at build time (see "Sorting fix" in the publish step), and the
-#    newest build always shows at the top. These small commits are only
-#    reachable through the release tags; they do not appear on any branch.
+#    GitHub sorts the Releases page by the DATE (the calendar day, NOT the time
+#    of day) of the commit each release's tag points to, not by publish time.
+#    Releases of the same day are then ordered by tag name, reverse
+#    alphabetical (our tags are not version numbers). So two things are done:
+#      - every release gets its own tag commit, dated at build time, so a build
+#        on a later day always sorts above one from an earlier day;
+#      - every tag is named build-<UTC date>-<UTC time>-<fingerprint>, so a
+#        later build on the SAME day also sorts above an earlier one.
+#    (See "Tag name and sorting fix" in the publish step.) The small tag commits
+#    are only reachable through the release tags; they do not appear on any
+#    branch. Older releases with a plain build-<fingerprint> tag are still
+#    recognised.
 #
 #  BUILD TOOLS (Visual Studio versions)
 #    The job runs on GitHub's "windows-latest" machine, which since June 2026 has
@@ -273,11 +280,17 @@ jobs:
           done <<< "$EXTRA_COMMITS"
 
           # ---- 2. Same inputs as an existing release? Then nothing to do -----
+          # FP identifies the inputs. The tag of a release is
+          # build-<UTC date>-<UTC time>-<FP> (made in the publish step; the time
+          # is what keeps same-day releases in order). Releases made before that
+          # change are just build-<FP>. Both forms count as "already built".
           FP=$(printf '%s\n' "$UP_SHA" "$PR_HEAD" $EXTRAS "$MFG_TAG" "$DLSSG_SHA" "$DLSSG_MX_SHA" "$MXP_TAG" "$MXP_ASSET_ID" | sha1sum | cut -c1-12)
-          TAG="build-$FP"
-          if [ "$FORCE" != "true" ] && gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > /dev/null 2>&1; then
-            echo "::notice::Nothing new since the last build ($TAG already exists)."
-            echo "### Nothing to do: \`$TAG\` already contains upstream \`$UP_SHORT\`, the same dashdogy changes, MFG Unlocker \`$MFG_TAG\`, dlssg-to-xefg \`${DLSSG_SHA:0:8}\` and realdody's dlssg-to-xefg \`${DLSSG_MX_SHA:0:8}\` (programs from \`$MXP_TAG\`)." >> "$GITHUB_STEP_SUMMARY"
+          SAME_TAGS=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName' 2> /dev/null \
+            | tr -d '\r' | grep -E "^build-([0-9]{8}-[0-9]{6}-)?$FP\$" || true)
+          if [ "$FORCE" != "true" ] && [ -n "$SAME_TAGS" ]; then
+            SAME_FIRST=$(printf '%s\n' "$SAME_TAGS" | head -n 1)
+            echo "::notice::Nothing new since the last build ($SAME_FIRST already exists)."
+            echo "### Nothing to do: \`$SAME_FIRST\` already contains upstream \`$UP_SHORT\`, the same dashdogy changes, MFG Unlocker \`$MFG_TAG\`, dlssg-to-xefg \`${DLSSG_SHA:0:8}\` and realdody's dlssg-to-xefg \`${DLSSG_MX_SHA:0:8}\` (programs from \`$MXP_TAG\`)." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -286,10 +299,10 @@ jobs:
           # Every release body ends with a hidden comment holding the commits it
           # was built from. Releases made before that existed are read from the
           # commit links in their description. A forced rebuild skips its own
-          # tag, so it compares against the release before it.
+          # release(s), so it compares against the release before them.
           PREV_TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,publishedAt \
             --jq 'sort_by(.publishedAt) | reverse | .[].tagName | select(startswith("build-"))' \
-            | tr -d '\r' | grep -vx "$TAG" | head -n 1 || true)
+            | tr -d '\r' | grep -vxF -f <(printf '%s\n' "$SAME_TAGS") | head -n 1 || true)
           PREV_BODY=""
           if [ -n "$PREV_TAG" ]; then
             PREV_BODY=$(gh release view "$PREV_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' 2> /dev/null | tr -d '\r' || true)
@@ -358,7 +371,7 @@ jobs:
 
           # ---- 6. Hand everything to the later steps -------------------------
           # (a small file that later steps load with "source")
-          for v in TAG VERSION FILENAME UP_SHA UP_SHORT UP_DATE UP_SUBJECT HEAD_SHORT HAS_PATCH MFG_TAG DLSSG_SHA DLSSG_SUBJECT DLSSG_MX_SHA DLSSG_MX_SUBJECT MXP_TAG MXP_ASSET_ID PREV_UP_SHA PREV_DLSSG_SHA PREV_DLSSG_MX_SHA; do
+          for v in FP SAME_TAGS VERSION FILENAME UP_SHA UP_SHORT UP_DATE UP_SUBJECT HEAD_SHORT HAS_PATCH MFG_TAG DLSSG_SHA DLSSG_SUBJECT DLSSG_MX_SHA DLSSG_MX_SUBJECT MXP_TAG MXP_ASSET_ID PREV_UP_SHA PREV_DLSSG_SHA PREV_DLSSG_MX_SHA; do
             printf '%s=%q\n' "$v" "${!v}"
           done > "$OUT/vars.sh"
           echo "build=true" >> "$GITHUB_OUTPUT"
@@ -595,23 +608,30 @@ jobs:
           } > "$NOTES"
           cat "$NOTES" >> "$GITHUB_STEP_SUMMARY"
 
-          # A forced rebuild replaces the release with the same tag.
-          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2> /dev/null || true
-          # Also remove a leftover tag from an earlier run that died before the
-          # release was created (otherwise creating the tag below would fail).
-          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" > /dev/null 2>&1 || true
+          # A forced rebuild replaces the release(s) already built from the same
+          # inputs (the new one gets a fresh tag below).
+          for old in $SAME_TAGS; do
+            echo "Replacing earlier release $old"
+            gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes 2> /dev/null || true
+          done
 
-          # ---- Sorting fix ---------------------------------------------------
-          # GitHub sorts the Releases page by the DATE OF THE COMMIT THE TAG POINTS
-          # TO, not by when the release was published. Pointing every release at
-          # $GITHUB_SHA (this repository's newest commit, which rarely changes)
-          # gave all releases the SAME date, and GitHub then ordered them by their
-          # random "build-<hash>" tag names, so a new release could land anywhere.
-          # Fix: for each release, make a new commit dated right now (same files as
-          # $GITHUB_SHA, nothing on any branch, nothing in your history) and tag
-          # that. A later build then always has a later date and sorts above the
-          # earlier ones.
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # ---- Tag name and sorting fix --------------------------------------
+          # GitHub sorts the Releases page by the DATE of the commit the tag points
+          # to (the calendar day only, the time of day is ignored), not by when the
+          # release was published. Releases of the same day are ordered by tag
+          # name, reverse alphabetical, because "build-..." is not a version
+          # number. Two things make the newest build always land on top:
+          #   1. The tag name starts with the build time (UTC):
+          #      build-<date>-<time>-<fingerprint>. Within one day a later build
+          #      then has the alphabetically later name. (A name made only of
+          #      the fingerprint hash put same-day builds in random order.)
+          #   2. The tag points to a new commit dated right now (same files as
+          #      $GITHUB_SHA, nothing on any branch, nothing in your history), so a
+          #      later day always sorts above an earlier one. (Pointing every
+          #      release at $GITHUB_SHA itself would give them all the same date.)
+          EPOCH=$(date -u +%s)
+          NOW=$(date -u -d "@$EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+          TAG="build-$(date -u -d "@$EPOCH" +%Y%m%d-%H%M%S)-$FP"
           BASE_TREE=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq '.tree.sha')
           STAMP_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/commits" \
             -f "message=Opti Morning $UP_DATE ($UP_SHORT)" \
@@ -638,7 +658,7 @@ jobs:
           # Keep only the newest KEEP_RELEASES releases made by this workflow
           # (tags starting with "build-").
           if [ "$KEEP_RELEASES" -gt 0 ]; then
-            gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
+            gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,publishedAt \
               --jq 'sort_by(.publishedAt) | reverse | .[].tagName | select(startswith("build-"))' \
               | tr -d '\r' | tail -n +"$((KEEP_RELEASES + 1))" \
               | while read -r old; do
