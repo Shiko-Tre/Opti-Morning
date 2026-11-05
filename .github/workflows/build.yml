@@ -118,6 +118,12 @@
 #        built fine on windows-latest before this change.
 #      - FakeMichau's dlssg-to-xefg says "use the installed Visual Studio's own
 #        toolset" (it only needs C++20), so it adapts to VS 2022 or VS 2026.
+#        Since 2026-11-04 it also has a Vulkan/D3D12 layer: its two git submodules
+#        (Vulkan-Headers, dxil-spirv, plus two nested ones of dxil-spirv) are fetched
+#        in the "Fetch add-ons" step, and its project runs CMake to build dxil-spirv
+#        (a few extra minutes). A fetch WITHOUT those submodules fails to compile.
+#        The same step also fetches realdody's submodules if his fork ever gets any
+#        (he has none today, so for him it does nothing).
 #      - realdody's dlssg-to-xefg asks for Visual Studio 2026 (v145 toolset),
 #        which windows-latest provides. An image with only VS 2022 (for
 #        example windows-2022) cannot build it.
@@ -396,15 +402,38 @@ jobs:
           shopt -s nullglob
           source "$GITHUB_WORKSPACE/out/vars.sh"
 
+          # Both dlssg-to-xefg repos are fetched shallow, which skips git submodules.
+          # Since 2026-11-04 FakeMichau's repo builds a Vulkan/D3D12 layer from two of
+          # them (third_party/Vulkan-Headers and third_party/dxil-spirv); left empty,
+          # its build fails. dxil-spirv has submodules of its own; only spirv-headers
+          # and dxbc-spirv are needed to build its C API (the same two FakeMichau's
+          # own CI fetches). A repo without .gitmodules is left alone (realdody's fork
+          # has none yet, but follows FakeMichau closely, so this covers him too).
+          fetch_submodules() {   # $1 = folder, $2 = name for the messages
+            local dir="$1" name="$2" sub
+            [ -f "$dir/.gitmodules" ] || return 0
+            echo "$name uses git submodules, fetching them"
+            git -C "$dir" submodule update --init --depth 1 --jobs 2
+            if [ -d "$dir/third_party/dxil-spirv" ]; then
+              git -C "$dir/third_party/dxil-spirv" submodule update --init --depth 1 \
+                third_party/spirv-headers subprojects/dxbc-spirv
+            fi
+            while read -r sub; do
+              [ -n "$(ls -A "$dir/$sub" 2> /dev/null)" ] || { echo "::error::$name: the submodule $sub is empty after fetching it."; exit 1; }
+            done < <(git -C "$dir" config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}')
+          }
+
           # dlssg-to-xefg: the exact commit chosen in the plan step
           git init -q dlssg
           git -C dlssg fetch -q --depth 1 "https://github.com/$DLSSG_REPO.git" "$DLSSG_SHA"
           git -C dlssg checkout -q FETCH_HEAD
+          fetch_submodules dlssg "FakeMichau's dlssg-to-xefg"
 
           # dlssg-to-xefg, realdody's fork: the exact commit chosen in the plan step
           git init -q dlssg-mx
           git -C dlssg-mx fetch -q --depth 1 "https://github.com/$DLSSG_MX_REPO.git" "$DLSSG_MX_SHA"
           git -C dlssg-mx checkout -q FETCH_HEAD
+          fetch_submodules dlssg-mx "realdody's dlssg-to-xefg"
 
           # MFG Unlocker: the release normally holds a ZIP with MFGUnlocker.dll
           # inside; a bare DLL is accepted too.
@@ -424,15 +453,30 @@ jobs:
         if: steps.plan.outputs.build == 'true'
         uses: microsoft/setup-msbuild@v3
 
-      - name: Build OptiScaler and both dlssg-to-xefg versions (Release x64)
+      # Three separate steps, so a red X in the Actions list says which project broke.
+
+      - name: Build OptiScaler (Release x64)
         if: steps.plan.outputs.build == 'true'
         shell: pwsh
         run: |
           msbuild -version
           msbuild src/OptiScaler.sln /m /p:Configuration=Release /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build dlssg-to-xefg, FakeMichau (Release x64)
+        if: steps.plan.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          # Its project first builds dxil-spirv with CMake (uses the submodules fetched
+          # above; needs cmake, which windows-latest has). This takes a few minutes.
+          cmake --version
           msbuild dlssg/dlssg-to-xefg.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build dlssg-to-xefg, realdody (Release x64)
+        if: steps.plan.outputs.build == 'true'
+        shell: pwsh
+        run: |
           # realdody's build also downloads the pinned MFG-Unlocker release (SHA-256
           # checked) and extracts bin\Release\xefg_mfg_programs from it. Needs internet.
           msbuild dlssg-mx/dlssg-to-xefg.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
