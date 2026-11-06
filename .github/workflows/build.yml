@@ -89,7 +89,12 @@
 #      folder? The run FAILS and nothing is published.
 #    - dashdogy's changes no longer fit the newest upstream code? The run FAILS
 #      (red X, you get an email) and NO release is published. The previous
-#      release stays available.
+#      release stays available. The only exception is a conflict listed in
+#      "Known conflict resolutions" (inside the "Plan and merge" step): there,
+#      both sides must match the text that was reviewed by hand, character for
+#      character. Any other conflict, or the same place changed again, still
+#      FAILS. Once dashdogy updates his pull request (or upstream merges it),
+#      the entry is simply never used and can be deleted.
 #    - Any download or build fails, or an expected file is missing? Same: the
 #      run fails and nothing half-built is published.
 #    - Upstream merges one of dashdogy's changes itself? The workflow notices and
@@ -352,11 +357,90 @@ jobs:
             exit 1
           }
 
+          # ---- Known conflict resolutions ------------------------------------
+          # When upstream and the pull request change the same lines, git stops
+          # with a conflict. A conflict that was looked at by hand is listed in
+          # FIXES below: the exact text of both sides and the text to use. It is
+          # only resolved when EVERY conflict in the merge matches an entry on
+          # BOTH sides (trailing blanks ignored). Otherwise nothing is touched
+          # and the run fails through give_up, as before.
+          #
+          # Entry 1 (upstream cdozdil, 2026-11-04, "Fix Vulkan FG and shader sync"
+          # vs. PR #1240): upstream added fIndex = fg->GetIndex(), the PR added a
+          # "fg == nullptr" early return. Both are wanted, and the null check has
+          # to come first because GetIndex() would dereference a null fg.
+          resolve_known_conflicts() { # $1 = file that receives the list of resolved files
+            local py
+            py=$(command -v python || command -v python3) || { echo "::warning::No Python found, cannot resolve known conflicts."; return 1; }
+            "$py" - "$1" << 'PY'
+          import re, subprocess, sys
+
+          OURS_1 = (
+              "    // The render thread can start the next frame meanwhile, all three go to this frame\n"
+              "    const auto fIndex = fg->GetIndex();\n"
+          )
+          THEIRS_1 = (
+              "    // The hudless is rebuilt on the Vulkan FG output, the DX12 one VkwDx12SC presents through only gets the candidates\n"
+              "    if (fg == nullptr)\n"
+              "        return;\n"
+          )
+          FIXES = {
+              "OptiScaler/hudfix/Hudfix_Vk.cpp": [
+                  (OURS_1, THEIRS_1, THEIRS_1 + "\n" + OURS_1),
+              ],
+          }
+
+          def norm(t):
+              return "\n".join(line.rstrip() for line in t.split("\n")).strip("\n")
+
+          unmerged = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"],
+                                    capture_output=True, text=True, check=True).stdout.split()
+          if not unmerged:
+              sys.exit("no conflicted files found")
+
+          block_re = re.compile(r"^<<<<<<< [^\n]*\n(.*?)^=======\n(.*?)^>>>>>>> [^\n]*\n", re.S | re.M)
+          done = {}
+          for path in unmerged:
+              if path not in FIXES:
+                  sys.exit("no known resolution for " + path)
+              raw = open(path, newline="").read()
+              crlf = "\r\n" in raw
+              text = raw.replace("\r\n", "\n")
+              fixes = list(FIXES[path])
+
+              def pick(m):
+                  for fix in fixes:
+                      if norm(m.group(1)) == norm(fix[0]) and norm(m.group(2)) == norm(fix[1]):
+                          return fix[2]
+                  sys.exit("conflict in %s does not match a known resolution" % path)
+
+              out = block_re.sub(pick, text)
+              if re.search(r"^(<<<<<<<|=======|>>>>>>>)", out, re.M):
+                  sys.exit("conflict markers left in " + path)
+              done[path] = out.replace("\n", "\r\n") if crlf else out
+
+          for path, out in done.items():
+              open(path, "w", newline="").write(out)
+              subprocess.run(["git", "add", path], check=True)
+              print("::notice::Resolved a known merge conflict in %s (kept upstream's and the PR's change)." % path)
+          open(sys.argv[1], "w").write("\n".join(done) + "\n")
+          PY
+          }
+
           if [ "$PR_HEAD" = "merged" ]; then
             echo "- PR #$PR_NUMBER is already part of upstream (nothing to add)." >> "$INCLUDED"
           else
-            git merge --no-ff --no-edit -m "Merge dashdogy PR #$PR_NUMBER on top of upstream $UP_SHORT" "refs/remotes/pr/$PR_NUMBER" || give_up "PR #$PR_NUMBER"
+            RESOLVED="$OUT/resolved-conflicts.txt"
+            : > "$RESOLVED"
+            if ! git merge --no-ff --no-edit -m "Merge dashdogy PR #$PR_NUMBER on top of upstream $UP_SHORT" "refs/remotes/pr/$PR_NUMBER"; then
+              resolve_known_conflicts "$RESOLVED" || give_up "PR #$PR_NUMBER"
+              git commit -q --no-edit
+            fi
             echo "- [PR #$PR_NUMBER](https://github.com/$UPSTREAM_REPO/pull/$PR_NUMBER): $PR_TITLE (head \`${PR_HEAD:0:8}\`)" >> "$INCLUDED"
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              echo "  - Needed a hand-made merge with newer upstream code in \`$f\` (both changes kept; the exact result is in \`combined-source.patch\`)." >> "$INCLUDED"
+            done < "$RESOLVED"
           fi
 
           for sha in $EXTRAS; do
